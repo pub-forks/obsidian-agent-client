@@ -32,15 +32,6 @@ interface AcpSessionResponse {
  */
 export class AcpTypeConverter {
 	/**
-	 * Convert ACP ToolCallContent to domain ToolCallContent.
-	 *
-	 * Filters out content types that are not supported by the domain model:
-	 * - Supports: "diff", "terminal", "content" (text)
-	 *
-	 * @param acpContent - Tool call content from ACP protocol
-	 * @returns Domain model tool call content, or undefined if input is null/empty
-	 */
-	/**
 	 * Convert ACP AvailableCommand[] to domain SlashCommand[].
 	 */
 	static toSlashCommands(
@@ -53,6 +44,15 @@ export class AcpTypeConverter {
 		}));
 	}
 
+	/**
+	 * Convert ACP ToolCallContent to domain ToolCallContent.
+	 *
+	 * Supported content types: "diff", "terminal", "content" (text only).
+	 * Non-text "content" blocks (image, audio, resource) are dropped.
+	 *
+	 * @param acpContent - Tool call content from ACP protocol
+	 * @returns Domain model tool call content, or undefined if input is null/empty
+	 */
 	static toToolCallContent(
 		acpContent: acp.ToolCallContent[] | undefined | null,
 	): ToolCallContent[] | undefined {
@@ -74,7 +74,9 @@ export class AcpTypeConverter {
 					terminalId: item.terminalId,
 				});
 			} else if (item.type === "content") {
-				if (item.content?.type === "text") {
+				// Only non-empty text content is rendered; other blocks
+				// (image, audio, resource) are dropped.
+				if (item.content.type === "text" && item.content.text) {
 					converted.push({
 						type: "content",
 						text: item.content.text,

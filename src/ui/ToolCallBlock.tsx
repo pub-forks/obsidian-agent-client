@@ -9,7 +9,6 @@ import { PermissionBanner } from "./PermissionBanner";
 import { LucideIcon } from "./shared/IconButton";
 import { toRelativePath } from "../utils/paths";
 import * as Diff from "diff";
-import { MarkdownRenderer } from "./shared/MarkdownRenderer";
 
 interface ToolCallBlockProps {
 	content: Extract<MessageContent, { type: "tool_call" }>;
@@ -167,15 +166,7 @@ export const ToolCallBlock = React.memo(function ToolCallBlock({
 					}
 					if (item.type === "content") {
 						return (
-							<div
-								key={index}
-								className="agent-client-message-tool-call-content"
-							>
-								<MarkdownRenderer
-									text={item.text}
-									plugin={plugin}
-								/>
-							</div>
+							<ToolContentBlock key={index} text={item.text} />
 						);
 					}
 					return null;
@@ -464,6 +455,40 @@ function DiffRenderer({
 						className="agent-client-diff-expand-icon"
 					/>
 				</div>
+			)}
+		</div>
+	);
+}
+
+// ============================================================
+// Tool text-output renderer (collapsible, de-emphasized)
+// ============================================================
+function ToolContentBlock({ text }: { text: string }) {
+	// Always collapsed by default: tool output is reference material the user
+	// opens on demand. No auto-expand on failure — diffs and terminals stay
+	// quiet until the user chooses to look, and this matches them.
+	const [isCollapsed, setIsCollapsed] = useState(true);
+	const lineCount = useMemo(
+		() => text.replace(/\n+$/, "").split("\n").length,
+		[text],
+	);
+
+	return (
+		<div className="agent-client-tool-call-output">
+			<div
+				className="agent-client-tool-call-output-header"
+				onClick={() => setIsCollapsed(!isCollapsed)}
+			>
+				<LucideIcon
+					name={isCollapsed ? "chevron-right" : "chevron-down"}
+					className="agent-client-tool-call-output-icon"
+				/>
+				<span className="agent-client-tool-call-output-label">
+					Output ({lineCount} {lineCount === 1 ? "line" : "lines"})
+				</span>
+			</div>
+			{!isCollapsed && (
+				<div className="agent-client-tool-call-output-body">{text}</div>
 			)}
 		</div>
 	);

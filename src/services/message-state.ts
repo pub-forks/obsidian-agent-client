@@ -41,11 +41,18 @@ export function mergeToolCallContent(
 	if (update.content !== undefined) {
 		const newContent = update.content || [];
 
-		// If new content contains diff, replace all old diffs
-		const hasDiff = newContent.some((item) => item.type === "diff");
-		if (hasDiff) {
+		// A tool_call_update re-sends diffs and text "content" as the tool's
+		// latest full state, so replace old items of those kinds instead of
+		// appending (prevents duplicated/growing panels). Terminals are keyed
+		// by terminalId and stay append-only.
+		const replaced = new Set<string>(
+			newContent
+				.map((item) => item.type)
+				.filter((type) => type === "diff" || type === "content"),
+		);
+		if (replaced.size > 0) {
 			mergedContent = mergedContent.filter(
-				(item) => item.type !== "diff",
+				(item) => !replaced.has(item.type),
 			);
 		}
 

@@ -378,11 +378,20 @@ session_id: ${sessionId}${tagsLine}
 
 		md += `**Status**: ${content.status}\n\n`;
 
-		// Only export diffs
+		// Export diffs and text output (terminals live only as ids)
 		if (content.content && content.content.length > 0) {
 			for (const item of content.content) {
 				if (item.type === "diff") {
 					md += this.convertDiffToMarkdown(item);
+				} else if (item.type === "content") {
+					// Fence longer than any backtick run in the text so
+					// output that itself contains ``` cannot break out.
+					const ticks = item.text.match(/`+/g);
+					const run = ticks
+						? Math.max(...ticks.map((t) => t.length))
+						: 0;
+					const fence = "`".repeat(Math.max(3, run + 1));
+					md += `${fence}\n${item.text}\n${fence}\n\n`;
 				}
 			}
 		}

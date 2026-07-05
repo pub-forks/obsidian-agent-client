@@ -428,14 +428,60 @@ If your plugin does not need CSS, delete this file.
 	font-size: 0.9em;
 }
 
-.agent-client-message-tool-call-content {
-	padding: 8px 12px;
-	font-size: 13px;
-	user-select: text;
-	overflow-wrap: break-word;
-	word-wrap: break-word;
+/* Tool call text output (collapsible, de-emphasized). Mirrors the diff
+   container + expand bar + terminal renderer; body text is --text-muted so
+   tool output reads quieter than the assistant's own message. */
+.agent-client-tool-call-output {
+	margin-top: 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.agent-client-tool-call-output-header {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 12px;
+	background-color: var(--background-secondary-alt);
+	cursor: pointer;
+	user-select: none;
+	transition: background-color 0.1s ease;
+}
+
+.agent-client-tool-call-output-header:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.agent-client-tool-call-output-icon {
+	display: flex;
+	align-items: center;
+	color: var(--text-muted);
+}
+
+.agent-client-tool-call-output-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.agent-client-tool-call-output-label {
+	font-size: 11px;
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+}
+
+.agent-client-tool-call-output-body {
+	padding: 8px;
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: 12px;
+	font-family: var(--font-monospace);
+	white-space: pre-wrap;
 	word-break: break-word;
-	max-width: 100%;
+	max-height: 400px;
+	overflow: auto;
+	user-select: text;
+	border-top: 1px solid var(--background-modifier-border);
 }
 
 /* Plan */
