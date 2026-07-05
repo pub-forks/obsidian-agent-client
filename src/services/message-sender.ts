@@ -36,8 +36,12 @@ import {
 	extractMentionedNotes,
 	type IMentionService,
 } from "../utils/mention-parser";
-import { convertWindowsPathToWsl } from "../utils/platform";
-import { buildFileUri } from "../utils/paths";
+import { buildFileUri, resolveAbsolutePath } from "../utils/paths";
+import {
+	type IWikilinkResolver,
+	type LineRange,
+} from "../utils/wikilink-resolver";
+import { formatLinkedNotesBlock } from "../utils/wikilink-formatter";
 
 // ============================================================================
 // Types
@@ -86,6 +90,12 @@ export interface PreparePromptInput {
 		wikiLinks?: boolean;
 		tables?: boolean;
 	};
+
+	/** Whether to enrich note content with wikilink metadata (default: false) */
+	expandWikilinkContext?: boolean;
+
+	/** Resolver for `[[wikilinks]]` inside note content; required when expandWikilinkContext=true */
+	wikilinkResolver?: IWikilinkResolver | null;
 }
 
 /**
@@ -191,13 +201,11 @@ async function processNote(
 	try {
 		const content = await vaultAccess.readNote(file.path);
 
-		let absolutePath = vaultBasePath
-			? `${vaultBasePath}/${file.path}`
-			: file.path;
-
-		if (convertToWsl) {
-			absolutePath = convertWindowsPathToWsl(absolutePath);
-		}
+		const absolutePath = resolveAbsolutePath(
+			file.path,
+			vaultBasePath,
+			convertToWsl,
+		);
 
 		const wasTruncated = content.length > maxNoteLength;
 		const processedContent = wasTruncated
@@ -257,12 +265,23 @@ async function readSelection(
 /**
  * Build auto-mention prefix string for session/load recovery.
  * Format: "@[[note name]]:from-to\n" or "@[[note name]]\n"
+ *
+ * Returns empty string when the user message starts with "/" to avoid
+ * corrupting ACP slash-command recognition at the text-block level.
+ * Agents detect slash commands by matching "/" at character 0 of a
+ * text ContentBlock's text field; the prefix would push "/" off char 0.
+ * The resource-block channel (autoMentionBlocks) still carries the
+ * note context for slash-command turns — see the ACP spec at
+ * https://agentclientprotocol.com/protocol/slash-commands which allows
+ * resource blocks alongside slash-command text blocks.
  */
 function buildAutoMentionPrefix(
 	activeNote: NoteMetadata | null | undefined,
 	isDisabled: boolean | undefined,
+	message: string,
 ): string {
 	if (!activeNote || isDisabled) return "";
+	if (message.startsWith("/")) return "";
 	if (activeNote.selection) {
 		return `@[[${activeNote.name}]]:${activeNote.selection.from.line + 1}-${activeNote.selection.to.line + 1}\n`;
 	}
@@ -302,10 +321,19 @@ function buildAgentMessageText(
 ): string {
 	const userMessage = autoMentionPrefix + message;
 
+	// Skip context blocks on slash-command turns to avoid colliding with
+	// the ACP command-detection rule (agents detect '/' at the start of
+	// a text ContentBlock). This is the fallback path for agents that
+	// don't support embeddedContext resource blocks; agents with
+	// embeddedContext receive note context through the separate resource
+	// ContentBlock path in preparePrompt, which stays spec-compliant
+	// alongside slash commands.
+	const isSlashCommand = message.startsWith("/");
+	const includeContext =
+		!isSlashCommand && contextBlocks && contextBlocks.length > 0;
+
 	return [
-		...(contextBlocks && contextBlocks.length > 0
-			? [contextBlocks.join("\n")]
-			: []),
+		...(includeContext ? [contextBlocks.join("\n")] : []),
 		...(userMessage ? [userMessage] : []),
 	].join("\n\n");
 }
@@ -325,6 +353,14 @@ function buildDisplayContent(input: PreparePromptInput): PromptContent[] {
 
 /**
  * Build auto-mention context metadata for UI.
+ *
+ * Returns metadata describing the auto-mentioned note for display as a
+ * UI badge. The caller is responsible for deciding whether the badge
+ * should reflect what was actually sent: agents that support
+ * embeddedContext receive the auto-mention as a Resource block even on
+ * slash-command turns (badge applies), while the text-context fallback
+ * path drops the note context on slash commands (badge should be
+ * skipped at the call site).
  */
 function buildAutoMentionContext(
 	activeNote: NoteMetadata | null | undefined,
@@ -344,20 +380,56 @@ function buildAutoMentionContext(
 }
 
 /**
- * Resolve absolute path with optional WSL conversion.
+ * Per-prompt scan context, or null when wikilink expansion is off. Holds the
+ * resolver plus path-conversion settings; there is no index to build (link
+ * data comes from Obsidian's metadata cache on demand).
  */
-function resolveAbsolutePath(
-	relativePath: string,
-	vaultBasePath: string,
-	convertToWsl: boolean,
-): string {
-	let absolutePath = vaultBasePath
-		? `${vaultBasePath}/${relativePath}`
-		: relativePath;
-	if (convertToWsl) {
-		absolutePath = convertWindowsPathToWsl(absolutePath);
-	}
-	return absolutePath;
+interface WikilinkScanContext {
+	resolver: IWikilinkResolver;
+	vaultBasePath: string;
+	convertToWsl: boolean;
+}
+
+/**
+ * Build the wikilink scan context, or null when expansion is disabled
+ * or the resolver port wasn't provided.
+ */
+function buildWikilinkContext(
+	input: PreparePromptInput,
+): WikilinkScanContext | null {
+	if (!input.expandWikilinkContext || !input.wikilinkResolver) return null;
+	return {
+		resolver: input.wikilinkResolver,
+		vaultBasePath: input.vaultBasePath,
+		convertToWsl: input.convertToWsl ?? false,
+	};
+}
+
+/**
+ * Build a standalone `<obsidian_note_links>` block for a note, or null when
+ * expansion is off or the note has no resolvable wikilinks. Reads links from
+ * the metadata cache (not the note text), optionally scoped to a selection's
+ * line range. Emitted as a SIBLING of the note content — never merged in, so
+ * the note block stays byte-identical to the note as read from disk.
+ *
+ * @param notePath  vault-relative note path (the resolver reads its cache)
+ * @param lineRange 0-based inclusive selection range, or undefined for whole note
+ * @param sourceRef identifier the sibling note block uses in this transport
+ *                  (resource `uri` for embedded, absolute path for XML)
+ */
+function buildLinkedNotesBlock(
+	notePath: string,
+	lineRange: LineRange | undefined,
+	sourceRef: string,
+	ctx: WikilinkScanContext | null,
+): string | null {
+	if (!ctx) return null;
+	const links = ctx.resolver.getNoteWikiLinks(notePath, lineRange);
+	if (links.length === 0) return null;
+	return formatLinkedNotesBlock(links, sourceRef, {
+		vaultBasePath: ctx.vaultBasePath,
+		convertToWsl: ctx.convertToWsl,
+	});
 }
 
 // ============================================================================
@@ -380,19 +452,11 @@ export async function preparePrompt(
 	vaultAccess: IVaultAccess,
 	mentionService: IMentionService,
 ): Promise<PreparePromptResult> {
-	// Step 1: Extract all mentioned notes from the message
 	const mentionedNotes = extractMentionedNotes(input.message, mentionService);
 
-	// Step 2: Build context based on agent capabilities
-	if (input.supportsEmbeddedContext) {
-		return preparePromptWithEmbeddedContext(
-			input,
-			vaultAccess,
-			mentionedNotes,
-		);
-	} else {
-		return preparePromptWithTextContext(input, vaultAccess, mentionedNotes);
-	}
+	return input.supportsEmbeddedContext
+		? preparePromptWithEmbeddedContext(input, vaultAccess, mentionedNotes)
+		: preparePromptWithTextContext(input, vaultAccess, mentionedNotes);
 }
 
 /**
@@ -407,7 +471,12 @@ async function preparePromptWithEmbeddedContext(
 	}>,
 ): Promise<PreparePromptResult> {
 	const maxNoteLen = input.maxNoteLength ?? DEFAULT_MAX_NOTE_LENGTH;
+	const wikilinkCtx = buildWikilinkContext(input);
 	const resourceBlocks: ResourcePromptContent[] = [];
+	// Wikilink metadata for the mentioned notes, emitted as sibling text
+	// blocks (never merged into resource.text) so each resource stays
+	// byte-identical to the note on disk.
+	const mentionedLinkBlocks: PromptContent[] = [];
 
 	// Build Resource blocks for each mentioned note
 	for (const { file } of mentionedNotes) {
@@ -436,9 +505,25 @@ async function preparePromptWithEmbeddedContext(
 				lastModified: note.lastModified,
 			},
 		});
+
+		// ref = the resource uri so the agent can correlate the two blocks.
+		const linksBlock = buildLinkedNotesBlock(
+			file.path,
+			undefined,
+			note.uri,
+			wikilinkCtx,
+		);
+		if (linksBlock) {
+			mentionedLinkBlocks.push({ type: "text", text: linksBlock });
+		}
 	}
 
-	// Build auto-mention Resource block
+	// Build auto-mention Resource block. Sent on slash-command turns too
+	// because Resource blocks are separate ContentBlocks — they don't
+	// interfere with ACP's "/" at char 0 detection on the user-message
+	// text block. Only buildAutoMentionPrefix needs the slash guard.
+	// See https://agentclientprotocol.com/protocol/slash-commands which
+	// allows resource blocks alongside slash-command text blocks.
 	const autoMentionBlocks: PromptContent[] = [];
 	if (input.activeNote && !input.isAutoMentionDisabled) {
 		const autoMentionResource = await buildAutoMentionResource(
@@ -447,6 +532,7 @@ async function preparePromptWithEmbeddedContext(
 			vaultAccess,
 			input.convertToWsl ?? false,
 			input.maxSelectionLength ?? DEFAULT_MAX_SELECTION_LENGTH,
+			wikilinkCtx,
 		);
 		autoMentionBlocks.push(...autoMentionResource);
 	}
@@ -454,6 +540,7 @@ async function preparePromptWithEmbeddedContext(
 	const autoMentionPrefix = buildAutoMentionPrefix(
 		input.activeNote,
 		input.isAutoMentionDisabled,
+		input.message,
 	);
 
 	// Build system prompt instructions (first message only)
@@ -463,18 +550,14 @@ async function preparePromptWithEmbeddedContext(
 		text,
 	}));
 
+	const messageText = autoMentionPrefix + input.message;
+
 	const agentContent: PromptContent[] = [
 		...systemBlocks,
 		...resourceBlocks,
+		...mentionedLinkBlocks,
 		...autoMentionBlocks,
-		...(input.message || autoMentionPrefix
-			? [
-					{
-						type: "text" as const,
-						text: autoMentionPrefix + input.message,
-					},
-				]
-			: []),
+		...(messageText ? [{ type: "text" as const, text: messageText }] : []),
 		...(input.images || []),
 		...(input.resourceLinks || []),
 	];
@@ -501,6 +584,7 @@ async function preparePromptWithTextContext(
 	}>,
 ): Promise<PreparePromptResult> {
 	const maxNoteLen = input.maxNoteLength ?? DEFAULT_MAX_NOTE_LENGTH;
+	const wikilinkCtx = buildWikilinkContext(input);
 	const contextBlocks: string[] = [];
 
 	// Build XML context blocks for each mentioned note
@@ -523,19 +607,33 @@ async function preparePromptWithTextContext(
 		contextBlocks.push(
 			`<obsidian_mentioned_note ref="${note.absolutePath}">\n${note.content}${truncationNote}\n</obsidian_mentioned_note>`,
 		);
+
+		// Sibling of the note block (ref = the same absolute path). Pushed as a
+		// separate contextBlock, so it is also dropped on slash-command turns
+		// by buildAgentMessageText's includeContext gate.
+		const linksBlock = buildLinkedNotesBlock(
+			file.path,
+			undefined,
+			note.absolutePath,
+			wikilinkCtx,
+		);
+		if (linksBlock) {
+			contextBlocks.push(linksBlock);
+		}
 	}
 
 	// Build auto-mention XML context
 	if (input.activeNote && !input.isAutoMentionDisabled) {
-		const autoMentionContextBlock = await buildAutoMentionTextContext(
+		const autoMentionContextBlocks = await buildAutoMentionTextContext(
 			input.activeNote.path,
 			input.vaultBasePath,
 			vaultAccess,
 			input.convertToWsl ?? false,
 			input.activeNote.selection,
 			input.maxSelectionLength ?? DEFAULT_MAX_SELECTION_LENGTH,
+			wikilinkCtx,
 		);
-		contextBlocks.push(autoMentionContextBlock);
+		contextBlocks.push(...autoMentionContextBlocks);
 	}
 
 	// Build system prompt instructions (first message only)
@@ -549,6 +647,7 @@ async function preparePromptWithTextContext(
 	const autoMentionPrefix = buildAutoMentionPrefix(
 		input.activeNote,
 		input.isAutoMentionDisabled,
+		input.message,
 	);
 
 	const agentMessageText = buildAgentMessageText(
@@ -568,10 +667,17 @@ async function preparePromptWithTextContext(
 	return {
 		displayContent: buildDisplayContent(input),
 		agentContent,
-		autoMentionContext: buildAutoMentionContext(
-			input.activeNote,
-			input.isAutoMentionDisabled,
-		),
+		// Skip the badge on slash-command turns because the text-context
+		// block was also dropped (see buildAgentMessageText). Keeping the
+		// badge state consistent with what was actually sent to the agent
+		// avoids a misleading "context attached" indicator on a turn that
+		// shipped no context.
+		autoMentionContext: input.message.startsWith("/")
+			? undefined
+			: buildAutoMentionContext(
+					input.activeNote,
+					input.isAutoMentionDisabled,
+				),
 	};
 }
 
@@ -584,6 +690,7 @@ async function buildAutoMentionResource(
 	vaultAccess: IVaultAccess,
 	convertToWsl: boolean,
 	maxSelectionLength: number,
+	wikilinkCtx: WikilinkScanContext | null,
 ): Promise<PromptContent[]> {
 	const absolutePath = resolveAbsolutePath(
 		activeNote.path,
@@ -616,7 +723,7 @@ async function buildAutoMentionResource(
 				`\n\n[Note: Truncated from ${sel.originalLength} to ${maxSelectionLength} characters]`
 			: sel.text;
 
-		return [
+		const blocks: PromptContent[] = [
 			{
 				type: "resource",
 				resource: { uri, mimeType: "text/markdown", text },
@@ -625,12 +732,28 @@ async function buildAutoMentionResource(
 					priority: 0.8,
 					lastModified: new Date(activeNote.modified).toISOString(),
 				},
-			} as ResourcePromptContent,
+			},
 			{
 				type: "text",
 				text: `The user has selected lines ${fromLine}-${toLine} in the above note. This is what they are currently focusing on.`,
 			},
 		];
+
+		// ref = the resource uri, matching the resource block above.
+		const linksBlock = buildLinkedNotesBlock(
+			activeNote.path,
+			{
+				fromLine: activeNote.selection.from.line,
+				toLine: activeNote.selection.to.line,
+			},
+			uri,
+			wikilinkCtx,
+		);
+		if (linksBlock) {
+			blocks.push({ type: "text", text: linksBlock });
+		}
+
+		return blocks;
 	}
 
 	return [
@@ -651,7 +774,8 @@ async function buildAutoMentionTextContext(
 	convertToWsl: boolean,
 	selection: { from: EditorPosition; to: EditorPosition } | undefined,
 	maxSelectionLength: number,
-): Promise<string> {
+	wikilinkCtx: WikilinkScanContext | null,
+): Promise<string[]> {
 	const absolutePath = resolveAbsolutePath(notePath, vaultPath, convertToWsl);
 
 	if (selection) {
@@ -665,23 +789,36 @@ async function buildAutoMentionTextContext(
 			maxSelectionLength,
 		);
 		if (!sel) {
-			return `<obsidian_opened_note selection="lines ${fromLine}-${toLine}">The user opened the note ${absolutePath} in Obsidian and is focusing on lines ${fromLine}-${toLine}. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the specific lines.</obsidian_opened_note>`;
+			return [
+				`<obsidian_opened_note selection="lines ${fromLine}-${toLine}">The user opened the note ${absolutePath} in Obsidian and is focusing on lines ${fromLine}-${toLine}. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the specific lines.</obsidian_opened_note>`,
+			];
 		}
 
 		const truncationNote = sel.wasTruncated
 			? `\n\n[Note: The selection was truncated. Original length: ${sel.originalLength} characters, showing first ${maxSelectionLength} characters]`
 			: "";
 
-		return `<obsidian_opened_note selection="lines ${fromLine}-${toLine}">
+		const openedNote = `<obsidian_opened_note selection="lines ${fromLine}-${toLine}">
 The user opened the note ${absolutePath} in Obsidian and selected the following text (lines ${fromLine}-${toLine}):
 
 ${sel.text}${truncationNote}
 
 This is what the user is currently focusing on.
 </obsidian_opened_note>`;
+
+		// Sibling of the opened-note block (ref = the same absolute path).
+		const linksBlock = buildLinkedNotesBlock(
+			notePath,
+			{ fromLine: selection.from.line, toLine: selection.to.line },
+			absolutePath,
+			wikilinkCtx,
+		);
+		return linksBlock ? [openedNote, linksBlock] : [openedNote];
 	}
 
-	return `<obsidian_opened_note>The user opened the note ${absolutePath} in Obsidian. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the content.</obsidian_opened_note>`;
+	return [
+		`<obsidian_opened_note>The user opened the note ${absolutePath} in Obsidian. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the content.</obsidian_opened_note>`,
+	];
 }
 
 // ============================================================================

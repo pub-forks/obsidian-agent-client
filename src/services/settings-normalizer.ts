@@ -6,8 +6,12 @@
  */
 
 import type { AgentEnvVar, CustomAgentSettings } from "../plugin";
-import type { BaseAgentSettings } from "../types/agent";
+import type {
+	BaseAgentSettings,
+	PresetAgentUserSettings,
+} from "../types/agent";
 import type { AgentConfig } from "../acp/acp-client";
+import type { PresetAgentDefinition } from "./preset-agents";
 
 // ============================================================================
 // Display Settings
@@ -139,14 +143,18 @@ export const normalizeCustomAgent = (
 				: "",
 		args: sanitizeArgs(agent?.args),
 		env: normalizeEnvVars(agent?.env),
+		enabled: bool(agent?.enabled, true),
 	};
 };
 
-// Ensure custom agent IDs are unique within the collection
+// Ensure custom agent IDs are unique within the collection. `reservedIds`
+// (e.g. all preset ids) seed the collision set: a custom colliding with a
+// reserved id is suffix-renamed the same way as a custom-custom duplicate.
 export const ensureUniqueCustomAgentIds = (
 	agents: CustomAgentSettings[],
+	reservedIds: readonly string[] = [],
 ): CustomAgentSettings[] => {
-	const seen = new Set<string>();
+	const seen = new Set<string>(reservedIds);
 	return agents.map((agent) => {
 		const base =
 			agent.id && agent.id.trim().length > 0
@@ -161,6 +169,137 @@ export const ensureUniqueCustomAgentIds = (
 		seen.add(candidate);
 		return { ...agent, id: candidate };
 	});
+};
+
+/**
+ * Resolve the stored default agent id from raw data.json contents.
+ * Migration: defaultAgentId ← activeAgentId (old name). Ids not present in
+ * `availableAgentIds` fall back to the first available id ("" if none).
+ */
+export const resolveDefaultAgentId = (
+	raw: Record<string, unknown>,
+	availableAgentIds: readonly string[],
+): string => {
+	const rawDefaultId =
+		str(raw.defaultAgentId, "") || str(raw.activeAgentId, "");
+	return rawDefaultId && availableAgentIds.includes(rawDefaultId)
+		? rawDefaultId
+		: availableAgentIds[0] || "";
+};
+
+// ============================================================================
+// Preset Agent Normalization
+// ============================================================================
+
+/**
+ * Callback that resolves the apiKeySecretId for a preset with legacy
+ * plaintext-key wiring (`def.apiKey.legacy` is set). The plugin injects an
+ * implementation backed by Obsidian's secret storage (side-effecting:
+ * secret writes + Notices); tests inject a fake. Called only for presets
+ * whose registry entry carries `apiKey.legacy`.
+ */
+export type ApiKeyMigrator = (args: {
+	def: PresetAgentDefinition;
+	/** apiKeySecretId currently stored for this preset ("" if unset). */
+	current: string;
+	/** Legacy plaintext apiKey lingering in data.json ("" if absent). */
+	legacyPlain: string;
+}) => string;
+
+/** Registry defaults as a fresh user-settings entry (no user overrides). */
+export const defaultPresetAgentSettings = (
+	def: PresetAgentDefinition,
+): PresetAgentUserSettings => ({
+	id: def.presetId,
+	displayName: def.defaultDisplayName,
+	apiKeySecretId: "",
+	command: def.defaultCommand,
+	args: [...def.defaultArgs],
+	env: [],
+	enabled: true,
+});
+
+/**
+ * Normalize the presetAgents record from raw data.json contents.
+ *
+ * Reproduces the historic per-agent loadSettings behavior verbatim:
+ * 1. Source order per preset: `raw.presetAgents[presetId]` → legacy
+ *    per-agent sub-object (`raw[legacySettingsKey]`) → registry defaults.
+ * 2. `id` is force-synced to presetId — never read from raw.
+ * 3. `command` falls back to the legacy top-level command-path key
+ *    (claudeCodeAcpCommandPath / geminiCommandPath) before the default.
+ * 4. Args that sanitize to empty fall back to the registry defaults
+ *    (historic Gemini behavior, generalized — a no-op for presets whose
+ *    defaults are empty).
+ * 5. `apiKeySecretId` goes through `migrateApiKey` only for presets with
+ *    legacy plaintext-key wiring.
+ * 6. Unknown presetIds (entries written by a newer plugin version, e.g. via
+ *    Obsidian Sync or a BRAT rollback) are preserved with field-level
+ *    sanitizing only, so a save round-trip doesn't destroy them. They are
+ *    not enumerated anywhere (enumeration is registry-driven).
+ *
+ * Takes the whole raw data.json object because legacy command-path keys
+ * live at the top level.
+ */
+export const normalizePresetAgents = (
+	raw: Record<string, unknown>,
+	registry: readonly PresetAgentDefinition[],
+	migrateApiKey: ApiKeyMigrator,
+): Record<string, PresetAgentUserSettings> => {
+	const rawRecord = obj(raw.presetAgents) ?? {};
+	const result: Record<string, PresetAgentUserSettings> = {};
+
+	for (const def of registry) {
+		const entry =
+			obj(rawRecord[def.presetId]) ??
+			(def.legacySettingsKey ? obj(raw[def.legacySettingsKey]) : null) ??
+			{};
+
+		const storedSecretId = str(entry.apiKeySecretId, "");
+		const apiKeySecretId = def.apiKey?.legacy
+			? migrateApiKey({
+					def,
+					current: storedSecretId,
+					legacyPlain: str(entry.apiKey, ""),
+				})
+			: storedSecretId;
+
+		const legacyCommand = def.legacyCommandPathKey
+			? str(raw[def.legacyCommandPathKey], "")
+			: "";
+		const args = sanitizeArgs(entry.args);
+
+		result[def.presetId] = {
+			id: def.presetId, // Fixed — never from raw
+			displayName: str(entry.displayName, def.defaultDisplayName),
+			apiKeySecretId,
+			command:
+				str(entry.command, "") || legacyCommand || def.defaultCommand,
+			args: args.length > 0 ? args : [...def.defaultArgs],
+			env: normalizeEnvVars(entry.env),
+			enabled: bool(entry.enabled, true),
+		};
+	}
+
+	// Preserve unknown presetIds (version skew): sanitize known fields,
+	// spread-through the rest so fields this version doesn't know survive.
+	const knownIds = new Set(registry.map((def) => def.presetId));
+	for (const [presetId, value] of Object.entries(rawRecord)) {
+		if (knownIds.has(presetId)) continue;
+		const entry = obj(value);
+		if (!entry) continue;
+		result[presetId] = {
+			...entry,
+			id: presetId,
+			displayName: str(entry.displayName, presetId),
+			apiKeySecretId: str(entry.apiKeySecretId, ""),
+			command: str(entry.command, ""),
+			args: sanitizeArgs(entry.args),
+			env: normalizeEnvVars(entry.env),
+		};
+	}
+
+	return result;
 };
 
 /**
@@ -242,6 +381,26 @@ export function strRecord(raw: unknown): Record<string, string> {
 			value.length > 0
 		) {
 			result[key] = value;
+		}
+	}
+	return result;
+}
+
+/** Normalize a nested string record, e.g. agentId → { optionId → value }. */
+export function nestedStrRecord(
+	raw: unknown,
+): Record<string, Record<string, string>> {
+	const result: Record<string, Record<string, string>> = {};
+	const o = obj(raw);
+	if (!o) return result;
+	for (const [key, value] of Object.entries(o)) {
+		if (
+			typeof key === "string" &&
+			key.length > 0 &&
+			key !== "__proto__" &&
+			key !== "constructor"
+		) {
+			result[key] = strRecord(value);
 		}
 	}
 	return result;

@@ -6,25 +6,31 @@ import {
 	Platform,
 	Menu,
 	setIcon,
+	TFile,
 	type MenuItem,
 } from "obsidian";
 
-import type { AttachedFile, ChatInputState } from "../types/chat";
+import type { AttachedFile, ChatInputState, ChatMessage } from "../types/chat";
+import type { NoteMetadata } from "../services/vault-service";
+import { isSameDirectory } from "../utils/platform";
+import { computeSessionTitle } from "../services/session-helpers";
 import { useHistoryModal } from "../hooks/useHistoryModal";
 import { useChatActions } from "../hooks/useChatActions";
 import { ChangeDirectoryModal } from "./ChangeDirectoryModal";
+import { addRenameSessionMenuItem } from "./EditTitleModal";
 
 // Service imports
 import { getLogger } from "../utils/logger";
 
 // Adapter imports
 import type { AcpClient } from "../acp/acp-client";
+import type { AgentClientPluginSettings } from "../plugin";
 
 // Context imports
 import { useChatContext } from "./ChatContext";
 
 // Hooks imports
-import { useSettings } from "../hooks/useSettings";
+import { useSettingsSelector } from "../hooks/useSettings";
 import { useSuggestions } from "../hooks/useSuggestions";
 import { useAgent } from "../hooks/useAgent";
 import { useSessionHistory } from "../hooks/useSessionHistory";
@@ -34,10 +40,12 @@ import {
 	flattenConfigSelectOptions,
 	type SlashCommand,
 	type SessionModeState,
-	type SessionModelState,
 	type SessionConfigOption,
 } from "../types/session";
 import { checkAgentUpdate } from "../services/update-checker";
+import type { SessionStatus } from "../services/view-registry";
+import { buildGeminiDeprecationNotice } from "../services/session-helpers";
+import { PRESET_AGENTS, GEMINI_PRESET_ID } from "../services/preset-agents";
 
 /** Stable empty array for useSuggestions when no commands available */
 const EMPTY_COMMANDS: SlashCommand[] = [];
@@ -59,6 +67,9 @@ import type { IChatViewHost } from "./view-host";
  */
 export interface ChatPanelCallbacks {
 	getDisplayName: () => string;
+	getSessionStatus: () => SessionStatus;
+	getSessionTitle: () => string;
+	getSessionId: () => string | null;
 	getInputState: () => ChatInputState | null;
 	setInputState: (state: ChatInputState) => void;
 	canSend: () => boolean;
@@ -71,14 +82,30 @@ export interface ChatPanelCallbacks {
 // ============================================================================
 
 export interface ChatPanelProps {
-	variant: "sidebar" | "floating";
+	variant: "sidebar" | "floating" | "embedded";
 	viewId: string;
 	workingDirectory?: string;
 	initialAgentId?: string;
-	config?: { agent?: string; model?: string };
+	config?: {
+		agent?: string;
+		model?: string;
+	};
+	/** Embedded variant only (meaningful when variant === "embedded"). */
+	embeddedConfig?: {
+		persist?: boolean;
+		noteContext?: "hosting";
+		sourcePath?: string;
+		/** Stable block id (from AgentChatBlockConfig.id; used as embedId). */
+		id?: string;
+	};
 	onRegisterCallbacks?: (callbacks: ChatPanelCallbacks) => void;
 	/** Called when agent ID changes (sidebar only — persists in Obsidian state) */
 	onAgentIdChanged?: (agentId: string) => void;
+	/**
+	 * Called when the derived session title may have changed (sidebar only —
+	 * triggers Obsidian to re-read getDisplayText() and update the tab header).
+	 */
+	onSessionTitleChanged?: () => void;
 	// Floating-specific
 	onMinimize?: () => void;
 	onClose?: () => void;
@@ -107,6 +134,53 @@ interface AppWithSettings {
 // ChatPanel Component
 // ============================================================================
 
+/** Debounce (ms) for re-saving when trailing chunks arrive after a turn ends (#320). */
+const TRAILING_SAVE_DEBOUNCE_MS = 800;
+
+// Settings slice actually consumed by ChatPanel. Subscribing to just these
+// fields (rather than the whole settings object) prevents a re-render on every
+// unrelated settings write for every mounted panel — multiple embedded blocks
+// especially (#20).
+function selectChatPanelSettings(s: AgentClientPluginSettings) {
+	return {
+		autoMentionActiveNote: s.autoMentionActiveNote,
+		debugMode: s.debugMode,
+		// Read by useChatActions (WSL path conversion); rarely changes.
+		windowsWslMode: s.windowsWslMode,
+		enableSystemNotifications: s.enableSystemNotifications,
+		savedSessions: s.savedSessions,
+		// Agent identity fields back activeAgentLabel + availableAgents (#341/#4).
+		// These change rarely (only via SettingsTab), so adding them to the slice
+		// does not erode the #20 narrow-subscription intent (no high-frequency
+		// fields here).
+		presetAgents: s.presetAgents,
+		customAgents: s.customAgents,
+		displaySettings: { fontSize: s.displaySettings.fontSize },
+	};
+}
+
+type ChatPanelSettings = ReturnType<typeof selectChatPanelSettings>;
+
+function chatPanelSettingsEqual(
+	a: ChatPanelSettings,
+	b: ChatPanelSettings,
+): boolean {
+	return (
+		a.autoMentionActiveNote === b.autoMentionActiveNote &&
+		a.debugMode === b.debugMode &&
+		a.windowsWslMode === b.windowsWslMode &&
+		a.enableSystemNotifications === b.enableSystemNotifications &&
+		// SessionStorage always writes a fresh array; reference compare suffices.
+		a.savedSessions === b.savedSessions &&
+		// SettingsTab.updatePresetAgent emits a fresh presetAgents record and
+		// flushSettings emits a fresh customAgents array on edit, so a
+		// reference compare detects agent changes (and only those).
+		a.presetAgents === b.presetAgents &&
+		a.customAgents === b.customAgents &&
+		a.displaySettings.fontSize === b.displaySettings.fontSize
+	);
+}
+
 /**
  * Core chat panel component that encapsulates all chat logic.
  *
@@ -115,14 +189,16 @@ interface AppWithSettings {
  * It is a 1:1 migration of useChatController into a React component,
  * with workspace event handlers moved from ChatComponent/FloatingChatComponent.
  */
-export function ChatPanel({
+export const ChatPanel = React.memo(function ChatPanel({
 	variant,
 	viewId,
 	workingDirectory,
 	initialAgentId,
 	config,
+	embeddedConfig,
 	onRegisterCallbacks,
 	onAgentIdChanged,
+	onSessionTitleChanged,
 	onMinimize,
 	onClose,
 	onOpenNewWindow,
@@ -166,7 +242,11 @@ export function ChatPanel({
 	// ============================================================
 	// Custom Hooks
 	// ============================================================
-	const settings = useSettings(plugin);
+	const settings = useSettingsSelector(
+		plugin,
+		selectChatPanelSettings,
+		chatPanelSettingsEqual,
+	);
 
 	const agent = useAgent(
 		acpClient,
@@ -184,10 +264,32 @@ export function ChatPanel({
 		errorInfo,
 	} = agent;
 
+	const pinnedActiveNote = useMemo<NoteMetadata | null>(() => {
+		if (
+			embeddedConfig?.noteContext !== "hosting" ||
+			!embeddedConfig.sourcePath
+		) {
+			return null;
+		}
+		const file = plugin.app.vault.getAbstractFileByPath(
+			embeddedConfig.sourcePath,
+		);
+		if (!(file instanceof TFile)) return null;
+		return {
+			path: file.path,
+			name: file.basename,
+			extension: file.extension,
+			created: file.stat.ctime,
+			modified: file.stat.mtime,
+		};
+	}, [plugin, embeddedConfig?.noteContext, embeddedConfig?.sourcePath]);
+
 	const suggestions = useSuggestions(
 		vaultService,
 		plugin,
 		session.availableCommands || EMPTY_COMMANDS,
+		settings.autoMentionActiveNote,
+		pinnedActiveNote,
 	);
 
 	// Session history hook with callback for session load
@@ -195,23 +297,16 @@ export function ChatPanel({
 		(
 			sessionId: string,
 			modes?: SessionModeState,
-			models?: SessionModelState,
 			configOptions?: SessionConfigOption[],
 		) => {
 			logger.log(
 				`[ChatPanel] Session loaded/resumed/forked: ${sessionId}`,
 				{
 					modes,
-					models,
 					configOptions,
 				},
 			);
-			void agent.updateSessionFromLoad(
-				sessionId,
-				modes,
-				models,
-				configOptions,
-			);
+			void agent.updateSessionFromLoad(sessionId, modes, configOptions);
 		},
 		[logger, agent.updateSessionFromLoad],
 	);
@@ -237,6 +332,21 @@ export function ChatPanel({
 	const [inputValue, setInputValue] = useState("");
 	const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
 
+	// Pending auto-send queued by the pending-prompt handler (drained when ready)
+	const [pendingAutoSend, setPendingAutoSend] = useState<string | null>(null);
+	const persistRestoreAttemptedRef = useRef(false);
+	// Tracks whether we've already re-spawned the agent to match a saved
+	// conversation before restoring it (prevents a restart loop).
+	const persistRestartedRef = useRef(false);
+	// Gate the mount-init session-creation effect: run on first mount, then
+	// re-run ONLY when the resolved agent identity actually changes (e.g. the
+	// sidebar's onAgentIdRestored late-applies a persisted agent). A bare
+	// run-once boolean would break that restoration path; keying on the agent
+	// still ignores agentCwd-driven agent.createSession reference churn, which
+	// is what caused the persist-restore re-spawn race.
+	const hasInitializedRef = useRef(false);
+	const lastInitAgentRef = useRef<string | undefined>(undefined);
+
 	// ============================================================
 	// Refs
 	// ============================================================
@@ -247,30 +357,24 @@ export function ChatPanel({
 	// ============================================================
 	const activeAgentLabel = useMemo(() => {
 		const activeId = session.agentId;
-		if (activeId === plugin.settings.claude.id) {
-			return (
-				plugin.settings.claude.displayName || plugin.settings.claude.id
-			);
+		if (PRESET_AGENTS.some((def) => def.presetId === activeId)) {
+			const preset = settings.presetAgents[activeId];
+			if (preset) {
+				return preset.displayName || preset.id;
+			}
 		}
-		if (activeId === plugin.settings.codex.id) {
-			return (
-				plugin.settings.codex.displayName || plugin.settings.codex.id
-			);
-		}
-		if (activeId === plugin.settings.gemini.id) {
-			return (
-				plugin.settings.gemini.displayName || plugin.settings.gemini.id
-			);
-		}
-		const custom = plugin.settings.customAgents.find(
+		const custom = settings.customAgents.find(
 			(agent) => agent.id === activeId,
 		);
 		return custom?.displayName || custom?.id || activeId;
-	}, [session.agentId, plugin.settings]);
+	}, [session.agentId, settings.presetAgents, settings.customAgents]);
 
 	const availableAgents = useMemo(() => {
 		return plugin.getAvailableAgents();
-	}, [plugin]);
+		// Depend on just the agent identity fields (not the whole slice), so
+		// unrelated slice changes (e.g. savedSessions on every turn save)
+		// don't rebuild the header dropdown.
+	}, [plugin, settings.presetAgents, settings.customAgents]);
 
 	// ============================================================
 	// Chat Actions
@@ -284,6 +388,7 @@ export function ChatPanel({
 		messages,
 		settings,
 		vaultPath,
+		embeddedConfig?.persist ? embeddedConfig.id : undefined,
 	);
 
 	const {
@@ -294,7 +399,6 @@ export function ChatPanel({
 		handleSwitchAgent,
 		handleRestartAgent,
 		handleSetMode,
-		handleSetModel,
 		handleSetConfigOption,
 		handleClearError,
 		handleClearAgentUpdate,
@@ -304,6 +408,46 @@ export function ChatPanel({
 		setAgentUpdateNotification,
 		autoExportIfEnabled,
 	} = actions;
+
+	// ============================================================
+	// Gemini CLI deprecation notice (static, agent-id driven)
+	// ============================================================
+	// Independent channel from the npm-backed agentUpdateNotification:
+	// derived synchronously from the active agent id (no network).
+	const geminiNotice = useMemo(
+		() =>
+			session.agentId === GEMINI_PRESET_ID
+				? buildGeminiDeprecationNotice()
+				: null,
+		[session.agentId],
+	);
+
+	// Dismiss state lives locally in ChatPanel so it never races with the
+	// async setAgentUpdateNotification owned by useChatActions.
+	const [geminiNoticeDismissed, setGeminiNoticeDismissed] = useState(false);
+
+	// Re-show the notice when switching agents (e.g. away and back to Gemini).
+	useEffect(() => {
+		setGeminiNoticeDismissed(false);
+	}, [session.agentId]);
+
+	const effectiveGeminiNotice =
+		geminiNotice && !geminiNoticeDismissed ? geminiNotice : null;
+
+	const handleClearGeminiNotice = useCallback(
+		() => setGeminiNoticeDismissed(true),
+		[],
+	);
+
+	// Wrap send so the Gemini notice also dismisses on send, mirroring how
+	// useChatActions clears agentUpdateNotification inside handleSendMessage.
+	const handleSendMessageWithGeminiDismiss = useCallback(
+		(content: string, attachments?: AttachedFile[]) => {
+			setGeminiNoticeDismissed(true);
+			return handleSendMessage(content, attachments);
+		},
+		[handleSendMessage],
+	);
 
 	const { handleOpenHistory } = useHistoryModal(
 		plugin,
@@ -381,6 +525,16 @@ export function ChatPanel({
 			menu.addSeparator();
 
 			// -- Actions section --
+			addRenameSessionMenuItem(
+				menu,
+				plugin,
+				session.sessionId,
+				plugin.settingsService
+					.getSavedSessions()
+					.find((s) => s.sessionId === session.sessionId)?.title ??
+					"New session",
+			);
+
 			menu.addItem((item: MenuItem) => {
 				item.setTitle("Open new view")
 					.setIcon("copy-plus")
@@ -411,6 +565,14 @@ export function ChatPanel({
 							},
 						);
 						modal.open();
+					});
+			});
+
+			menu.addItem((item: MenuItem) => {
+				item.setTitle("Open session manager")
+					.setIcon("layout-list")
+					.onClick(() => {
+						void plugin.activateSessionManager();
 					});
 			});
 
@@ -468,6 +630,16 @@ export function ChatPanel({
 
 			menu.addSeparator();
 
+			addRenameSessionMenuItem(
+				menu,
+				plugin,
+				session.sessionId,
+				plugin.settingsService
+					.getSavedSessions()
+					.find((s) => s.sessionId === session.sessionId)?.title ??
+					"New session",
+			);
+
 			if (onOpenNewWindow) {
 				menu.addItem((item: MenuItem) => {
 					item.setTitle("Open new floating chat")
@@ -498,6 +670,14 @@ export function ChatPanel({
 							},
 						);
 						modal.open();
+					});
+			});
+
+			menu.addItem((item: MenuItem) => {
+				item.setTitle("Open session manager")
+					.setIcon("layout-list")
+					.onClick(() => {
+						void plugin.activateSessionManager();
 					});
 			});
 
@@ -545,14 +725,14 @@ export function ChatPanel({
 		// Floating: create a shim with listener tracking
 		return {
 			app: plugin.app,
-			registerDomEvent: ((
+			registerDomEvent: (
 				target: Window | Document | HTMLElement,
 				type: string,
 				callback: EventListenerOrEventListenerObject,
 			) => {
 				target.addEventListener(type, callback);
 				registeredListenersRef.current.push({ target, type, callback });
-			}) as IChatViewHost["registerDomEvent"],
+			},
 		};
 	}, [viewHostProp, plugin.app]);
 
@@ -575,20 +755,94 @@ export function ChatPanel({
 	// ============================================================
 	// Initialize session on mount
 	useEffect(() => {
+		const resolvedAgent = config?.agent || initialAgentId;
+		if (
+			hasInitializedRef.current &&
+			lastInitAgentRef.current === resolvedAgent
+		) {
+			return;
+		}
+		hasInitializedRef.current = true;
+		lastInitAgentRef.current = resolvedAgent;
 		logger.log("[Debug] Starting connection setup via useSession...");
-		void agent.createSession(config?.agent || initialAgentId);
+		void agent.createSession(resolvedAgent);
 	}, [agent.createSession, config?.agent, initialAgentId]);
 
-	// Apply configured model when session is ready
+	useEffect(() => {
+		if (variant !== "embedded") return;
+		if (!embeddedConfig?.persist || !embeddedConfig.id) return;
+		if (!isSessionReady || !session.sessionId || !session.agentId) return;
+		if (persistRestoreAttemptedRef.current) return;
+
+		// Resolve by the device-neutral embedId ALONE — not filtered by the
+		// current agent/cwd — so an unpinned block that switched agents, or one
+		// whose conversation lives under a custom "New chat in directory…" cwd,
+		// still finds its last session (#5, #11).
+		const savedSession = plugin.settingsService.getSavedSessionByEmbedId(
+			embeddedConfig.id,
+		);
+		if (!savedSession || savedSession.sessionId === session.sessionId) {
+			persistRestoreAttemptedRef.current = true;
+			return;
+		}
+
+		// restoreSession loads against the CURRENT agent process and cannot
+		// switch agents (loadSession/resumeSession run on the live connection).
+		// If the saved conversation used a different agent, re-spawn under it
+		// first (adopting its cwd), then let this effect re-run to perform the
+		// load. setAgentCwd is safe here because the mount-init effect is
+		// guarded to run once (hasInitializedRef).
+		if (
+			savedSession.agentId !== session.agentId &&
+			!persistRestartedRef.current
+		) {
+			persistRestartedRef.current = true;
+			setAgentCwd(savedSession.cwd);
+			void agent.restartSession(savedSession.agentId, savedSession.cwd);
+			return;
+		}
+
+		if (!sessionHistory.canRestore) {
+			persistRestoreAttemptedRef.current = true;
+			return;
+		}
+
+		persistRestoreAttemptedRef.current = true;
+		// Align agentCwd with the restored conversation so the cwd banner and
+		// later first-message saves reflect its real directory (restoreSession
+		// itself does not touch agentCwd). Safe under the mount-init guard.
+		setAgentCwd(savedSession.cwd);
+		void sessionHistory.restoreSession(
+			savedSession.sessionId,
+			savedSession.cwd,
+		);
+	}, [
+		variant,
+		embeddedConfig?.persist,
+		embeddedConfig?.id,
+		isSessionReady,
+		session.sessionId,
+		session.agentId,
+		sessionHistory.canRestore,
+		sessionHistory.restoreSession,
+		plugin.settingsService,
+		agent.restartSession,
+	]);
+
+	// Apply configured model (a select config option with category "model")
+	// when session is ready.
 	useEffect(() => {
 		if (!config?.model || !isSessionReady) return;
 
-		// Prefer configOptions if available
 		if (session.configOptions) {
 			const modelOption = session.configOptions.find(
 				(o) => o.category === "model",
 			);
-			if (modelOption && modelOption.currentValue !== config.model) {
+			if (
+				modelOption &&
+				modelOption.type === "select" &&
+				modelOption.currentValue !== config.model
+			) {
 				const valueExists = flattenConfigSelectOptions(
 					modelOption.options,
 				).some((o) => o.value === config.model);
@@ -600,29 +854,12 @@ export function ChatPanel({
 					void agent.setConfigOption(modelOption.id, config.model);
 				}
 			}
-			return;
-		}
-
-		// Fallback to legacy models
-		if (session.models) {
-			const modelExists = session.models.availableModels.some(
-				(m) => m.modelId === config.model,
-			);
-			if (modelExists && session.models.currentModelId !== config.model) {
-				logger.log(
-					"[ChatPanel] Applying configured model:",
-					config.model,
-				);
-				void agent.setModel(config.model);
-			}
 		}
 	}, [
 		config?.model,
 		isSessionReady,
 		session.configOptions,
-		session.models,
 		agent.setConfigOption,
-		agent.setModel,
 		logger,
 	]);
 
@@ -631,19 +868,43 @@ export function ChatPanel({
 	const sessionRef = useRef(session);
 	const autoExportRef = useRef(autoExportIfEnabled);
 	const closeSessionRef = useRef(agent.closeSession);
+	const saveSessionMessagesRef = useRef(sessionHistory.saveSessionMessages);
+	// True once the user has actually run a turn in THIS session. The
+	// trailing-chunk re-save and close-time flush are armed only after a real
+	// turn, so messages that were merely loaded/replayed are never re-saved
+	// (which would bump updatedAt and corrupt "last used" ordering). (#320 review)
+	const sentThisSessionRef = useRef(false);
+	// Reference identity of the messages array last persisted to disk. Used to
+	// de-duplicate the turn-end save, the trailing-chunk re-save, and the
+	// close-time flush.
+	const lastSavedMessagesRef = useRef<ChatMessage[] | null>(null);
 	messagesRef.current = messages;
 	sessionRef.current = session;
 	autoExportRef.current = autoExportIfEnabled;
 	closeSessionRef.current = agent.closeSession;
+	saveSessionMessagesRef.current = sessionHistory.saveSessionMessages;
 
 	// Cleanup on unmount only - auto-export and close session
 	useEffect(() => {
 		return () => {
 			logger.log("[ChatPanel] Cleanup: auto-export and close session");
+			// Flush trailing-chunk content the debounced save may not have
+			// persisted yet (view closed within the debounce window). Only when a
+			// real turn ran this session and there is unsaved content. (#320 review)
+			const latest = messagesRef.current;
+			const sid = sessionRef.current.sessionId;
+			if (
+				sentThisSessionRef.current &&
+				sid &&
+				latest.length > 0 &&
+				lastSavedMessagesRef.current !== latest
+			) {
+				saveSessionMessagesRef.current(sid, latest);
+			}
 			void (async () => {
 				await autoExportRef.current(
 					"closeChat",
-					messagesRef.current,
+					latest,
 					sessionRef.current,
 				);
 				await closeSessionRef.current();
@@ -685,6 +946,13 @@ export function ChatPanel({
 	// ============================================================
 	const prevIsSendingRef = useRef<boolean>(false);
 
+	// Re-loading/switching sessions disarms the trailing-chunk save & flush, so
+	// freshly loaded/replayed messages are never re-saved (which would bump
+	// updatedAt and corrupt "last used" ordering). (#320 review)
+	useEffect(() => {
+		sentThisSessionRef.current = false;
+	}, [session.sessionId]);
+
 	useEffect(() => {
 		const wasSending = prevIsSendingRef.current;
 		prevIsSendingRef.current = isSending;
@@ -696,13 +964,18 @@ export function ChatPanel({
 			session.sessionId &&
 			messages.length > 0
 		) {
+			sentThisSessionRef.current = true;
+			lastSavedMessagesRef.current = messages;
 			sessionHistory.saveSessionMessages(session.sessionId, messages);
 			logger.log(
 				`[ChatPanel] Session messages saved: ${session.sessionId}`,
 			);
 
 			// System notification on response completion
-			if (settings.enableSystemNotifications && !document.hasFocus()) {
+			if (
+				settings.enableSystemNotifications &&
+				!activeDocument.hasFocus()
+			) {
 				new Notification("Agent Client", {
 					body: `${activeAgentLabel} has completed the response.`,
 				});
@@ -718,6 +991,64 @@ export function ChatPanel({
 		logger,
 	]);
 
+	// Some agents (e.g. OpenCode) emit trailing message chunks *after* end_turn,
+	// so the turn-end save above runs before they arrive and the persisted copy
+	// is truncated. Re-save when messages change while idle, debounced so rapid
+	// trailing updates coalesce into a single write (avoids racing the file). (#320)
+	useEffect(() => {
+		const sessionId = session.sessionId;
+		if (isSending || !sessionId || messages.length === 0) return;
+		if (!sentThisSessionRef.current) return;
+		if (lastSavedMessagesRef.current === messages) return;
+		const timer = window.setTimeout(() => {
+			lastSavedMessagesRef.current = messages;
+			sessionHistory.saveSessionMessages(sessionId, messages);
+		}, TRAILING_SAVE_DEBOUNCE_MS);
+		return () => window.clearTimeout(timer);
+	}, [
+		isSending,
+		session.sessionId,
+		messages,
+		sessionHistory.saveSessionMessages,
+	]);
+
+	// ============================================================
+	// Effects - Notify ViewRegistry of State Changes
+	// ============================================================
+	// `hasMessages` flips false → true on first message and then stays stable
+	// for the rest of the conversation. The Session Manager's title and
+	// status only depend on this boolean transition, not on per-chunk growth,
+	// so we avoid notifying on every streamed token.
+	const hasMessages = messages.length > 0;
+	useEffect(() => {
+		plugin.viewRegistry.notifyChange();
+	}, [
+		plugin.viewRegistry,
+		session.state,
+		session.sessionId,
+		isSending,
+		agent.hasActivePermission,
+		sessionHistory.loading,
+		hasMessages,
+	]);
+
+	// ============================================================
+	// Effects - Notify Sidebar Container of Session Title Changes
+	// ============================================================
+	const sessionTitle = useMemo(
+		() =>
+			computeSessionTitle(
+				session.sessionId,
+				settings.savedSessions ?? [],
+				messages,
+			),
+		[session.sessionId, settings.savedSessions, messages],
+	);
+	// Fires on initial mount + every sessionTitle change so the tab reflects the current title.
+	useEffect(() => {
+		onSessionTitleChanged?.();
+	}, [onSessionTitleChanged, sessionTitle]);
+
 	// ============================================================
 	// Effects - System Notification on Permission Request
 	// ============================================================
@@ -732,7 +1063,7 @@ export function ChatPanel({
 			!wasActive &&
 			agent.hasActivePermission &&
 			settings.enableSystemNotifications &&
-			!document.hasFocus()
+			!activeDocument.hasFocus()
 		) {
 			new Notification("Agent Client", {
 				body: `${activeAgentLabel} is requesting permission.`,
@@ -877,6 +1208,45 @@ export function ChatPanel({
 		suggestions.mentions.toggleAutoMention,
 	]);
 
+	// Deterministic prompt delivery: register a handler the plugin invokes
+	// directly (or that drains a queued prompt) instead of a timed workspace
+	// broadcast. setInputValue / setPendingAutoSend are stable useState
+	// setters, so [plugin, viewId] deps suffice.
+	useEffect(() => {
+		return plugin.registerPendingPromptHandler(
+			viewId,
+			(prompt, autoSend) => {
+				if (typeof prompt !== "string" || prompt.length === 0) return;
+				setInputValue(prompt);
+				// Injected prompts are a fresh message — don't carry over any
+				// attachments already staged in this panel (#341/#6).
+				setAttachedFiles([]);
+				if (autoSend) setPendingAutoSend(prompt);
+			},
+		);
+	}, [plugin, viewId]);
+
+	// ============================================================
+	// Effects - Drain pending auto-send when session becomes ready
+	// ============================================================
+	useEffect(() => {
+		if (!pendingAutoSend) return;
+		if (!isSessionReady) return;
+		if (isSending) return;
+		if (sessionHistory.loading) return;
+
+		const prompt = pendingAutoSend;
+		setPendingAutoSend(null);
+		setInputValue("");
+		void handleSendMessage(prompt);
+	}, [
+		pendingAutoSend,
+		isSessionReady,
+		isSending,
+		sessionHistory.loading,
+		handleSendMessage,
+	]);
+
 	// ============================================================
 	// Effects - Focus Tracking
 	// ============================================================
@@ -909,18 +1279,41 @@ export function ChatPanel({
 	const attachedFilesRef = useRef(attachedFiles);
 	const isSessionReadyRef = useRef(isSessionReady);
 	const isSendingRef = useRef(isSending);
+	const sessionStateRef = useRef(session.state);
+	const sessionIdRef = useRef(session.sessionId);
+	const hasActivePermissionRef = useRef(agent.hasActivePermission);
 	const sessionHistoryLoadingRef = useRef(sessionHistory.loading);
 	const handleSendMessageRef = useRef(handleSendMessage);
 	inputValueRef.current = inputValue;
 	attachedFilesRef.current = attachedFiles;
 	isSessionReadyRef.current = isSessionReady;
 	isSendingRef.current = isSending;
+	sessionStateRef.current = session.state;
+	sessionIdRef.current = session.sessionId;
+	hasActivePermissionRef.current = agent.hasActivePermission;
 	sessionHistoryLoadingRef.current = sessionHistory.loading;
 	handleSendMessageRef.current = handleSendMessage;
 
 	useEffect(() => {
 		onRegisterCallbacks?.({
 			getDisplayName: () => activeAgentLabel,
+			getSessionStatus: () => {
+				const state = sessionStateRef.current;
+				if (state === "error") return "error";
+				if (state === "disconnected") return "disconnected";
+				if (hasActivePermissionRef.current) return "permission";
+				if (isSendingRef.current || sessionHistoryLoadingRef.current)
+					return "busy";
+				if (state === "ready") return "ready";
+				return "busy";
+			},
+			getSessionTitle: () =>
+				computeSessionTitle(
+					sessionIdRef.current,
+					plugin.settingsService.getSnapshot().savedSessions ?? [],
+					messagesRef.current,
+				),
+			getSessionId: () => sessionIdRef.current,
 			getInputState: () => ({
 				text: inputValueRef.current,
 				files: attachedFilesRef.current,
@@ -991,13 +1384,13 @@ export function ChatPanel({
 				variant="sidebar"
 				agentLabel={activeAgentLabel}
 				isUpdateAvailable={isUpdateAvailable}
-				hasHistoryCapability={sessionHistory.canShowSessionHistory}
 				onNewChat={() => void handleNewChatWithPersist()}
 				onExportChat={() => void handleExportChat()}
 				onShowMenu={handleShowSidebarMenu}
 				onOpenHistory={handleOpenHistory}
 			/>
-		) : (
+		) : variant === "floating" ? (
+			// Floating variant always shows the agent selector (no agent pinning).
 			<ChatHeader
 				variant="floating"
 				agentLabel={activeAgentLabel}
@@ -1009,10 +1402,26 @@ export function ChatPanel({
 				onMinimize={onMinimize}
 				onClose={onClose}
 			/>
+		) : (
+			// Embedded variant: hide the agent selector when the block pins an
+			// agent (config.agent) by passing undefined for the selector props.
+			<ChatHeader
+				variant="embedded"
+				agentLabel={activeAgentLabel}
+				isUpdateAvailable={isUpdateAvailable}
+				availableAgents={config?.agent ? undefined : availableAgents}
+				currentAgentId={session.agentId}
+				onAgentChange={
+					config?.agent
+						? undefined
+						: (agentId) => void handleSwitchAgent(agentId)
+				}
+				onShowMenu={handleShowFloatingMenu}
+			/>
 		);
 
 	const cwdBanner =
-		agentCwd !== vaultPath ? (
+		agentCwd !== vaultPath && !isSameDirectory(agentCwd, vaultPath) ? (
 			<div className="agent-client-cwd-banner" title={agentCwd}>
 				<span
 					className="agent-client-cwd-banner-icon"
@@ -1051,13 +1460,11 @@ export function ChatPanel({
 			suggestions={suggestions}
 			plugin={plugin}
 			view={viewHost}
-			onSendMessage={handleSendMessage}
+			onSendMessage={handleSendMessageWithGeminiDismiss}
 			onStopGeneration={handleStopGeneration}
 			onRestoredMessageConsumed={handleRestoredMessageConsumed}
 			modes={session.modes}
 			onModeChange={(modeId) => void handleSetMode(modeId)}
-			models={session.models}
-			onModelChange={(modelId) => void handleSetModel(modelId)}
 			configOptions={session.configOptions}
 			onConfigOptionChange={(configId, value) =>
 				void handleSetConfigOption(configId, value)
@@ -1076,6 +1483,9 @@ export function ChatPanel({
 			// Agent update notification props
 			agentUpdateNotification={agentUpdateNotification}
 			onClearAgentUpdate={handleClearAgentUpdate}
+			// Gemini CLI deprecation notice props
+			geminiNotice={effectiveGeminiNotice}
+			onClearGeminiNotice={handleClearGeminiNotice}
 			messages={messages}
 		/>
 	);
@@ -1102,6 +1512,25 @@ export function ChatPanel({
 		);
 	}
 
+	if (variant === "embedded") {
+		return (
+			<div
+				ref={containerRef}
+				className="agent-client-chat-view-container agent-client-embedded-chat-panel"
+				style={chatFontSizeStyle}
+			>
+				<div className="agent-client-embedded-header">
+					{headerElement}
+				</div>
+				{cwdBanner}
+				<div className="agent-client-embedded-messages-container">
+					{messageListElement}
+				</div>
+				{inputAreaElement}
+			</div>
+		);
+	}
+
 	// Sidebar layout
 	return (
 		<div
@@ -1115,4 +1544,4 @@ export function ChatPanel({
 			{inputAreaElement}
 		</div>
 	);
-}
+});

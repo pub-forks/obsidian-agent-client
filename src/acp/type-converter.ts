@@ -21,7 +21,6 @@ import type {
 interface AcpSessionResponse {
 	sessionId?: string;
 	modes?: acp.SessionModeState | null;
-	models?: acp.SessionModelState | null;
 	configOptions?: acp.SessionConfigOption[] | null;
 }
 
@@ -105,15 +104,29 @@ export class AcpTypeConverter {
 	static toSessionConfigOptions(
 		acpOptions: acp.SessionConfigOption[],
 	): SessionConfigOption[] {
-		return acpOptions.map((opt) => ({
-			id: opt.id,
-			name: opt.name,
-			description: opt.description ?? undefined,
-			category: opt.category ?? undefined,
-			type: opt.type,
-			currentValue: opt.currentValue,
-			options: this.toSessionConfigSelectOptions(opt.options),
-		}));
+		return acpOptions.map((opt): SessionConfigOption => {
+			const base = {
+				id: opt.id,
+				name: opt.name,
+				description: opt.description ?? undefined,
+				category: opt.category ?? undefined,
+			};
+			// boolean options (ACP 0.28+) are carried as data; the UI renders
+			// and sets only select options for now.
+			if (opt.type === "boolean") {
+				return {
+					...base,
+					type: "boolean",
+					currentValue: opt.currentValue,
+				};
+			}
+			return {
+				...base,
+				type: "select",
+				currentValue: opt.currentValue,
+				options: this.toSessionConfigSelectOptions(opt.options),
+			};
+		});
 	}
 
 	private static toSessionConfigSelectOptions(
@@ -171,18 +184,6 @@ export class AcpTypeConverter {
 			};
 		}
 
-		let models: SessionResult["models"];
-		if (response.models) {
-			models = {
-				availableModels: response.models.availableModels.map((m) => ({
-					modelId: m.modelId,
-					name: m.name,
-					description: m.description ?? undefined,
-				})),
-				currentModelId: response.models.currentModelId,
-			};
-		}
-
 		const configOptions = response.configOptions
 			? this.toSessionConfigOptions(response.configOptions)
 			: undefined;
@@ -190,7 +191,6 @@ export class AcpTypeConverter {
 		return {
 			sessionId,
 			modes,
-			models,
 			configOptions,
 		};
 	}

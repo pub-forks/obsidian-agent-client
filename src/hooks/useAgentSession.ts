@@ -11,13 +11,13 @@ const { useState, useCallback, useRef } = React;
 import type {
 	ChatSession,
 	SessionModeState,
-	SessionModelState,
 	SessionUpdate,
 	SessionConfigOption,
 } from "../types/session";
 import type { AcpClient } from "../acp/acp-client";
 import type { ISettingsAccess } from "../services/settings-service";
 import type { ErrorInfo } from "../types/errors";
+import { extractErrorMessage } from "../utils/error-utils";
 import { getLogger } from "../utils/logger";
 import {
 	type AgentDisplayInfo,
@@ -31,6 +31,7 @@ import {
 import {
 	applyLegacyValue,
 	tryRestoreConfigOption,
+	restoreSavedConfigOptions,
 	restoreLegacyConfig,
 } from "../services/session-state";
 
@@ -58,13 +59,11 @@ export interface UseAgentSessionReturn {
 	updateSessionFromLoad: (
 		sessionId: string,
 		modes?: SessionModeState,
-		models?: SessionModelState,
 		configOptions?: SessionConfigOption[],
 	) => Promise<void>;
 
 	// Config
 	setMode: (modeId: string) => Promise<void>;
-	setModel: (modelId: string) => Promise<void>;
 	setConfigOption: (configId: string, value: string) => Promise<void>;
 
 	/** Handle session-level updates (commands, mode, config, usage, error) */
@@ -182,7 +181,6 @@ export function useAgentSession(
 				authMethods: [],
 				availableCommands: undefined,
 				modes: undefined,
-				models: undefined,
 				configOptions: undefined,
 				usage: undefined,
 				promptCapabilities: prev.promptCapabilities,
@@ -208,7 +206,6 @@ export function useAgentSession(
 				}
 
 				const agentConfig = buildAgentConfigWithApiKey(
-					settings,
 					agentSettings,
 					agentId,
 					effectiveCwd,
@@ -223,29 +220,23 @@ export function useAgentSession(
 				const sessionResult =
 					await agentClient.newSession(effectiveCwd);
 
-				setSession((prev) => ({
-					...prev,
-					sessionId: sessionResult.sessionId,
-					state: "ready",
-					authMethods: initResult?.authMethods ?? [],
-					modes: sessionResult.modes,
-					models: sessionResult.models,
-					configOptions: sessionResult.configOptions,
-					promptCapabilities: initResult
-						? initResult.promptCapabilities
-						: prev.promptCapabilities,
-					agentCapabilities: initResult
-						? initResult.agentCapabilities
-						: prev.agentCapabilities,
-					agentInfo: initResult
-						? initResult.agentInfo
-						: prev.agentInfo,
-					lastActivityAt: new Date(),
-				}));
+				// Pre-compute restored modes/configOptions BEFORE
+				// marking state as "ready" to avoid a UI race: without this,
+				// the dropdowns briefly show the agent's default values and
+				// a message sent during the window hits the agent in the
+				// wrong mode. With this, the first render after session
+				// creation already shows the user's saved selection.
+				let finalModes = sessionResult.modes;
+				let finalConfigOptions = sessionResult.configOptions;
 
-				// Restore last used config (model/mode)
 				if (sessionResult.configOptions && sessionResult.sessionId) {
 					let configOptions = sessionResult.configOptions;
+					configOptions = await restoreSavedConfigOptions(
+						agentClient,
+						sessionResult.sessionId,
+						configOptions,
+						settings.lastUsedConfigOptions[agentId],
+					);
 					configOptions = await tryRestoreConfigOption(
 						agentClient,
 						sessionResult.sessionId,
@@ -260,26 +251,39 @@ export function useAgentSession(
 						"mode",
 						settings.lastUsedModes[agentId],
 					);
-					if (configOptions !== sessionResult.configOptions) {
-						setSession((prev) => ({
-							...prev,
-							configOptions,
-						}));
-					}
+					finalConfigOptions = configOptions;
 				} else if (sessionResult.sessionId) {
-					await restoreLegacyConfig(
+					const restored = await restoreLegacyConfig(
 						agentClient,
 						sessionResult,
-						settings.lastUsedModels[agentId],
 						settings.lastUsedModes[agentId],
-						setSession,
 					);
+					finalModes = restored.modes;
 				}
+
+				setSession((prev) => ({
+					...prev,
+					sessionId: sessionResult.sessionId,
+					state: "ready",
+					authMethods: initResult?.authMethods ?? [],
+					modes: finalModes,
+					configOptions: finalConfigOptions,
+					promptCapabilities: initResult
+						? initResult.promptCapabilities
+						: prev.promptCapabilities,
+					agentCapabilities: initResult
+						? initResult.agentCapabilities
+						: prev.agentCapabilities,
+					agentInfo: initResult
+						? initResult.agentInfo
+						: prev.agentInfo,
+					lastActivityAt: new Date(),
+				}));
 			} catch (error) {
 				setSession((prev) => ({ ...prev, state: "error" }));
 				setErrorInfo({
 					title: "Session Creation Failed",
-					message: `Failed to create new session: ${error instanceof Error ? error.message : String(error)}`,
+					message: `Failed to create new session: ${extractErrorMessage(error)}`,
 					suggestion:
 						"Please check the agent configuration and try again.",
 				});
@@ -343,26 +347,27 @@ export function useAgentSession(
 		async (
 			sessionId: string,
 			modes?: SessionModeState,
-			models?: SessionModelState,
 			configOptions?: SessionConfigOption[],
 		) => {
-			setSession((prev) => ({
-				...prev,
-				sessionId,
-				state: "ready",
-				modes: modes ?? prev.modes,
-				models: models ?? prev.models,
-				configOptions: configOptions ?? prev.configOptions,
-				lastActivityAt: new Date(),
-			}));
-
-			// Restore last used config (model/mode) — same logic as createSession
+			// Pre-compute restored config BEFORE marking ready to avoid a UI
+			// race where the dropdowns briefly show the agent's current values
+			// before the user's saved selection is re-applied. See the matching
+			// refactor in createSession for the rationale.
 			const s = sessionRef.current;
 			const settings = settingsAccess.getSnapshot();
 			const agentId = s.agentId;
 
+			let finalModes = modes;
+			let finalConfigOptions = configOptions;
+
 			if (configOptions && sessionId) {
 				let restored = configOptions;
+				restored = await restoreSavedConfigOptions(
+					agentClient,
+					sessionId,
+					restored,
+					settings.lastUsedConfigOptions[agentId],
+				);
 				restored = await tryRestoreConfigOption(
 					agentClient,
 					sessionId,
@@ -377,21 +382,24 @@ export function useAgentSession(
 					"mode",
 					settings.lastUsedModes[agentId],
 				);
-				if (restored !== configOptions) {
-					setSession((prev) => ({
-						...prev,
-						configOptions: restored,
-					}));
-				}
+				finalConfigOptions = restored;
 			} else if (sessionId && modes) {
-				await restoreLegacyConfig(
+				const restored = await restoreLegacyConfig(
 					agentClient,
-					{ sessionId, modes, models, configOptions: undefined },
-					settings.lastUsedModels[agentId],
+					{ sessionId, modes, configOptions: undefined },
 					settings.lastUsedModes[agentId],
-					setSession,
 				);
+				finalModes = restored.modes;
 			}
+
+			setSession((prev) => ({
+				...prev,
+				sessionId,
+				state: "ready",
+				modes: finalModes ?? prev.modes,
+				configOptions: finalConfigOptions ?? prev.configOptions,
+				lastActivityAt: new Date(),
+			}));
 		},
 		[agentClient, settingsAccess],
 	);
@@ -401,44 +409,33 @@ export function useAgentSession(
 	// ============================================================
 
 	const setLegacyConfigValue = useCallback(
-		async (kind: "mode" | "model", value: string) => {
+		async (value: string) => {
 			const s = sessionRef.current;
 			if (!s.sessionId) {
-				getLogger().debug(`Cannot set ${kind}: no active session`);
+				getLogger().debug("Cannot set mode: no active session");
 				return;
 			}
 
-			const previousValue =
-				kind === "mode"
-					? s.modes?.currentModeId
-					: s.models?.currentModelId;
+			const previousValue = s.modes?.currentModeId;
 
-			setSession((prev) => applyLegacyValue(prev, kind, value));
+			setSession((prev) => applyLegacyValue(prev, value));
 
 			try {
-				if (kind === "mode") {
-					await agentClient.setSessionMode(s.sessionId, value);
-				} else {
-					await agentClient.setSessionModel(s.sessionId, value);
-				}
+				await agentClient.setSessionMode(s.sessionId, value);
 
 				if (s.agentId) {
-					const persistKey =
-						kind === "mode" ? "lastUsedModes" : "lastUsedModels";
 					const currentSettings = settingsAccess.getSnapshot();
 					void settingsAccess.updateSettings({
-						[persistKey]: {
-							...currentSettings[persistKey],
+						lastUsedModes: {
+							...currentSettings.lastUsedModes,
 							[s.agentId]: value,
 						},
 					});
 				}
 			} catch (error) {
-				getLogger().error(`Failed to set ${kind}:`, error);
+				getLogger().error("Failed to set mode:", error);
 				if (previousValue) {
-					setSession((prev) =>
-						applyLegacyValue(prev, kind, previousValue),
-					);
+					setSession((prev) => applyLegacyValue(prev, previousValue));
 				}
 			}
 		},
@@ -446,12 +443,7 @@ export function useAgentSession(
 	);
 
 	const setMode = useCallback(
-		(modeId: string) => setLegacyConfigValue("mode", modeId),
-		[setLegacyConfigValue],
-	);
-
-	const setModel = useCallback(
-		(modelId: string) => setLegacyConfigValue("model", modelId),
+		(modeId: string) => setLegacyConfigValue(modeId),
 		[setLegacyConfigValue],
 	);
 
@@ -459,7 +451,9 @@ export function useAgentSession(
 		async (configId: string, value: string) => {
 			const s = sessionRef.current;
 			if (!s.sessionId) {
-				getLogger().debug("Cannot set config option: no active session");
+				getLogger().debug(
+					"Cannot set config option: no active session",
+				);
 				return;
 			}
 
@@ -470,7 +464,7 @@ export function useAgentSession(
 				return {
 					...prev,
 					configOptions: prev.configOptions.map((opt) =>
-						opt.id === configId
+						opt.id === configId && opt.type === "select"
 							? { ...opt, currentValue: value }
 							: opt,
 					),
@@ -491,23 +485,39 @@ export function useAgentSession(
 				const changedOption = updatedOptions.find(
 					(o) => o.id === configId,
 				);
-				if (changedOption?.category === "model" && s.agentId) {
+				if (changedOption && s.agentId) {
 					const currentSettings = settingsAccess.getSnapshot();
-					void settingsAccess.updateSettings({
-						lastUsedModels: {
-							...currentSettings.lastUsedModels,
-							[s.agentId]: value,
-						},
-					});
-				}
-				if (changedOption?.category === "mode" && s.agentId) {
-					const currentSettings = settingsAccess.getSnapshot();
-					void settingsAccess.updateSettings({
-						lastUsedModes: {
-							...currentSettings.lastUsedModes,
-							[s.agentId]: value,
-						},
-					});
+					if (changedOption.category === "model") {
+						void settingsAccess.updateSettings({
+							lastUsedModels: {
+								...currentSettings.lastUsedModels,
+								[s.agentId]: value,
+							},
+						});
+					} else if (changedOption.category === "mode") {
+						void settingsAccess.updateSettings({
+							lastUsedModes: {
+								...currentSettings.lastUsedModes,
+								[s.agentId]: value,
+							},
+						});
+					} else if (
+						configId !== "__proto__" &&
+						configId !== "constructor"
+					) {
+						const allOptions =
+							currentSettings.lastUsedConfigOptions;
+						const agentOptions = allOptions[s.agentId] ?? {};
+						void settingsAccess.updateSettings({
+							lastUsedConfigOptions: {
+								...allOptions,
+								[s.agentId]: {
+									...agentOptions,
+									[configId]: value,
+								},
+							},
+						});
+					}
 				}
 			} catch (error) {
 				getLogger().error("Failed to set config option:", error);
@@ -537,7 +547,6 @@ export function useAgentSession(
 		getAvailableAgents,
 		updateSessionFromLoad,
 		setMode,
-		setModel,
 		setConfigOption,
 		handleSessionUpdate,
 	};

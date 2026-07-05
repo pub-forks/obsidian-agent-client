@@ -1,12 +1,24 @@
 import {
 	Plugin,
 	WorkspaceLeaf,
-	WorkspaceSplit,
 	Notice,
 	requestUrl,
+	MarkdownRenderChild,
+	type MarkdownPostProcessorContext,
+	TFile,
 } from "obsidian";
 import * as semver from "semver";
 import { ChatView, VIEW_TYPE_CHAT } from "./ui/ChatView";
+import {
+	mountCodeBlockChat,
+	EmbeddedChatViewContainer,
+} from "./ui/CodeBlockChatView";
+import { mountAgentButtonBlock } from "./ui/AgentButtonBlock";
+import { parseAgentBlock } from "./utils/agent-block-parser";
+import {
+	SessionManagerView,
+	VIEW_TYPE_SESSION_MANAGER,
+} from "./ui/SessionManagerView";
 import {
 	createFloatingChat,
 	FloatingViewContainer,
@@ -20,10 +32,12 @@ import {
 import { AgentClientSettingTab } from "./ui/SettingsTab";
 import { AcpClient } from "./acp/acp-client";
 import {
-	sanitizeArgs,
-	normalizeEnvVars,
 	normalizeCustomAgent,
 	ensureUniqueCustomAgentIds,
+	normalizePresetAgents,
+	defaultPresetAgentSettings,
+	resolveDefaultAgentId,
+	type ApiKeyMigrator,
 	parseChatFontSize,
 	str,
 	bool,
@@ -31,20 +45,38 @@ import {
 	enumVal,
 	obj,
 	strRecord,
+	nestedStrRecord,
 	xyPoint,
 } from "./services/settings-normalizer";
+import { PRESET_AGENTS } from "./services/preset-agents";
+import {
+	getAvailableAgentsFromSettings,
+	getAllAgentsFromSettings,
+	findAgentSettings,
+	isAgentEnabled,
+	firstEnabledAgentId,
+	repairNoEnabledAgents,
+} from "./services/session-helpers";
 import {
 	AgentEnvVar,
-	GeminiAgentSettings,
-	ClaudeAgentSettings,
-	CodexAgentSettings,
+	PresetAgentUserSettings,
 	CustomAgentSettings,
 } from "./types/agent";
 import type { SavedSessionInfo } from "./types/session";
 import { initializeLogger, getLogger } from "./utils/logger";
 
 // Re-export for backward compatibility
-export type { AgentEnvVar, CustomAgentSettings };
+export type { AgentEnvVar, PresetAgentUserSettings, CustomAgentSettings };
+
+/**
+ * Generate a short, device-neutral block id for persist embedded chats.
+ * 16 hex chars derived from crypto.randomUUID — enough entropy for per-note
+ * blocks, short enough to hand-edit. Mirrors crypto.randomUUID usage already
+ * present across the codebase (e.g. ui/ChatView.tsx, services/message-state.ts).
+ */
+function generateEmbedId(): string {
+	return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+}
 
 /**
  * Send message shortcut configuration.
@@ -67,14 +99,20 @@ export type ChatViewLocation =
 	| "editor-split";
 
 export interface AgentClientPluginSettings {
-	gemini: GeminiAgentSettings;
-	claude: ClaudeAgentSettings;
-	codex: CodexAgentSettings;
+	/**
+	 * Per-preset user overrides, keyed by presetId (see
+	 * services/preset-agents.ts for the static registry). Normalization
+	 * guarantees an entry for every registry preset; unknown keys written by
+	 * a newer plugin version are preserved but never enumerated.
+	 */
+	presetAgents: Record<string, PresetAgentUserSettings>;
 	customAgents: CustomAgentSettings[];
 	/** Default agent ID for new views (renamed from activeAgentId for multi-session) */
 	defaultAgentId: string;
 	autoAllowPermissions: boolean;
 	autoMentionActiveNote: boolean;
+	/** Surface `[[wikilinks]]` inside note content as resolved metadata so the agent can decide which links to follow */
+	expandWikilinkContext: boolean;
 	/** Show OS system notifications on response completion and permission requests */
 	enableSystemNotifications: boolean;
 	/** Prompt injection settings for Obsidian-flavored Markdown guidance */
@@ -123,6 +161,8 @@ export interface AgentClientPluginSettings {
 	lastUsedModels: Record<string, string>;
 	// Last used mode per agent (agentId → modeId)
 	lastUsedModes: Record<string, string>;
+	// Last used non-model/mode config options per agent (agentId → {optionId → value})
+	lastUsedConfigOptions: Record<string, Record<string, string>>;
 	// Floating chat settings
 	enableFloatingChat: boolean;
 	floatingButtonImage: string;
@@ -132,34 +172,17 @@ export interface AgentClientPluginSettings {
 }
 
 const DEFAULT_SETTINGS: AgentClientPluginSettings = {
-	claude: {
-		id: "claude-code-acp",
-		displayName: "Claude Code",
-		apiKeySecretId: "",
-		command: "claude-agent-acp",
-		args: [],
-		env: [],
-	},
-	codex: {
-		id: "codex-acp",
-		displayName: "Codex",
-		apiKeySecretId: "",
-		command: "codex-acp",
-		args: [],
-		env: [],
-	},
-	gemini: {
-		id: "gemini-cli",
-		displayName: "Gemini CLI",
-		apiKeySecretId: "",
-		command: "gemini",
-		args: ["--experimental-acp"],
-		env: [],
-	},
+	presetAgents: Object.fromEntries(
+		PRESET_AGENTS.map((def) => [
+			def.presetId,
+			defaultPresetAgentSettings(def),
+		]),
+	),
 	customAgents: [],
-	defaultAgentId: "claude-code-acp",
+	defaultAgentId: PRESET_AGENTS[0].presetId,
 	autoAllowPermissions: false,
 	autoMentionActiveNote: true,
+	expandWikilinkContext: true,
 	enableSystemNotifications: true,
 	promptInjection: {
 		enabled: true,
@@ -195,6 +218,7 @@ const DEFAULT_SETTINGS: AgentClientPluginSettings = {
 	savedSessions: [],
 	lastUsedModels: {},
 	lastUsedModes: {},
+	lastUsedConfigOptions: {},
 	enableFloatingChat: false,
 	floatingButtonImage: "",
 	floatingWindowSize: { width: 400, height: 500 },
@@ -211,10 +235,32 @@ export default class AgentClientPlugin extends Plugin {
 
 	/** Map of viewId to AcpClient for multi-session support */
 	private _acpClients: Map<string, AcpClient> = new Map();
+	/**
+	 * Pending-prompt handlers keyed by viewId. A ChatPanel registers its
+	 * handler on mount; runPromptInChat delivers through it (deterministic
+	 * handshake that replaces a timed workspace broadcast).
+	 */
+	private _pendingPromptHandlers = new Map<
+		string,
+		(prompt: string, autoSend: boolean) => void
+	>();
+	/** Prompts queued before their target ChatPanel registered a handler. */
+	private _pendingPrompts = new Map<
+		string,
+		Array<{ prompt: string; autoSend: boolean }>
+	>();
+	/**
+	 * Pending graceful AcpClient teardown timers, keyed by viewId. An embedded
+	 * block schedules teardown on unmount and cancels it on (re)mount, so
+	 * re-processing churn keeps one client while genuine removal reaps it.
+	 */
+	private _acpTeardownTimers = new Map<string, number>();
 	/** Floating button container (independent from chat view instances) */
 	private floatingButton: FloatingButtonContainer | null = null;
 	/** Counter for generating unique floating chat instance IDs */
 	private floatingChatCounter = 0;
+	/** Guards against concurrent embed-id injection for the same block. */
+	private embedIdInjectionInFlight = new Set<string>();
 
 	async onload() {
 		await this.loadSettings();
@@ -228,7 +274,14 @@ export default class AgentClientPlugin extends Plugin {
 		// "Attempting to register an existing view type" when Obsidian's
 		// hot-reload races onunload/onload (e.g. rapid toggle or npm run dev).
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_CHAT);
+
 		this.registerView(VIEW_TYPE_CHAT, (leaf) => new ChatView(leaf, this));
+
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_SESSION_MANAGER);
+		this.registerView(
+			VIEW_TYPE_SESSION_MANAGER,
+			(leaf) => new SessionManagerView(leaf, this),
+		);
 
 		const ribbonIconEl = this.addRibbonIcon(
 			"bot-message-square",
@@ -270,6 +323,14 @@ export default class AgentClientPlugin extends Plugin {
 				void this.openNewChatViewWithAgent(
 					this.settings.defaultAgentId,
 				);
+			},
+		});
+
+		this.addCommand({
+			id: "open-session-manager",
+			name: "Open session manager",
+			callback: () => {
+				void this.activateSessionManager();
 			},
 		});
 
@@ -339,6 +400,14 @@ export default class AgentClientPlugin extends Plugin {
 
 		this.addSettingTab(new AgentClientSettingTab(this.app, this));
 
+		this.registerMarkdownCodeBlockProcessor(
+			"agent-client",
+			(source, el, ctx) => this.renderAgentBlock(source, el, ctx),
+		);
+		this.registerMarkdownCodeBlockProcessor("agent", (source, el, ctx) =>
+			this.renderAgentBlock(source, el, ctx),
+		);
+
 		// Mount floating button (always present; visibility controlled by settings inside component)
 		this.floatingButton = new FloatingButtonContainer(this);
 		this.floatingButton.mount();
@@ -364,6 +433,19 @@ export default class AgentClientPlugin extends Plugin {
 				this._acpClients.clear();
 			}),
 		);
+
+		// Keep the focused chat view in sync when the active leaf changes
+		// (e.g. clicking a chat tab in the tab bar). ChatPanel's DOM
+		// focus/click listeners only fire on interaction inside the view, so a
+		// tab-bar switch would otherwise leave the Session Manager highlight on
+		// the previous view until the user clicks into the new one.
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", (leaf) => {
+				if (leaf?.view instanceof ChatView) {
+					this.setLastActiveChatViewId(leaf.view.viewId);
+				}
+			}),
+		);
 	}
 
 	onunload() {
@@ -378,6 +460,15 @@ export default class AgentClientPlugin extends Plugin {
 			}
 		}
 
+		// Unmount all embedded chat instances via registry. Their host
+		// MarkdownRenderChild is owned by the workspace (not the plugin), so the
+		// React roots are not torn down by plugin unload unless we do it here.
+		for (const container of this.viewRegistry.getByType("embedded")) {
+			if (container instanceof EmbeddedChatViewContainer) {
+				container.unmount();
+			}
+		}
+
 		// Clear registry (sidebar views are managed by Obsidian workspace)
 		this.viewRegistry.clear();
 
@@ -386,6 +477,16 @@ export default class AgentClientPlugin extends Plugin {
 			client.disconnect().catch(() => {});
 		}
 		this._acpClients.clear();
+
+		// Drop any undelivered pending-prompt handlers and queued prompts.
+		this._pendingPromptHandlers.clear();
+		this._pendingPrompts.clear();
+
+		// Cancel any pending graceful AcpClient teardowns.
+		for (const timer of this._acpTeardownTimers.values()) {
+			window.clearTimeout(timer);
+		}
+		this._acpTeardownTimers.clear();
 	}
 
 	/**
@@ -430,6 +531,32 @@ export default class AgentClientPlugin extends Plugin {
 		}
 		// Note: lastActiveChatViewId is now managed by viewRegistry
 		// Clearing happens automatically when view is unregistered
+	}
+
+	/** Grace window before an embedded AcpClient is actually disconnected. */
+	private static readonly ACP_TEARDOWN_GRACE_MS = 250;
+
+	/** Cancel a pending graceful teardown for a viewId (called on (re)mount). */
+	acquireAcpClient(viewId: string): void {
+		const timer = this._acpTeardownTimers.get(viewId);
+		if (timer !== undefined) {
+			window.clearTimeout(timer);
+			this._acpTeardownTimers.delete(viewId);
+		}
+	}
+
+	/**
+	 * Schedule a graceful teardown of a viewId's AcpClient. A re-acquire within
+	 * the grace window cancels it, so a rapid unmount/remount (re-processing)
+	 * keeps one client; only genuine removal disconnects the agent process.
+	 */
+	releaseAcpClient(viewId: string): void {
+		if (this._acpTeardownTimers.has(viewId)) return;
+		const timer = window.setTimeout(() => {
+			this._acpTeardownTimers.delete(viewId);
+			void this.removeAcpClient(viewId);
+		}, AgentClientPlugin.ACP_TEARDOWN_GRACE_MS);
+		this._acpTeardownTimers.set(viewId, timer);
 	}
 
 	/**
@@ -480,6 +607,34 @@ export default class AgentClientPlugin extends Plugin {
 			await workspace.revealLeaf(leaf);
 			this.focusTextarea(leaf);
 		}
+	}
+
+	async activateSessionManager(): Promise<void> {
+		const { workspace } = this.app;
+
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_SESSION_MANAGER);
+		if (leaves.length > 0) {
+			await workspace.revealLeaf(leaves[0]);
+			return;
+		}
+
+		const leaf = workspace.getLeftLeaf(false);
+		if (leaf) {
+			await leaf.setViewState({
+				type: VIEW_TYPE_SESSION_MANAGER,
+				active: true,
+			});
+			await workspace.revealLeaf(leaf);
+		}
+	}
+
+	/**
+	 * Close a specific chat view (sidebar or floating).
+	 * Dispatch is via IChatViewContainer.closeContainer(); plugin does not
+	 * need to know the concrete container class.
+	 */
+	closeView(viewId: string): void {
+		this.viewRegistry.get(viewId)?.closeContainer();
 	}
 
 	/**
@@ -556,7 +711,7 @@ export default class AgentClientPlugin extends Plugin {
 			const tabGroup = sidebarLeaf.parent;
 			// Index is clamped by Obsidian, so a large value appends to the end
 			return workspace.createLeafInParent(
-				tabGroup as unknown as WorkspaceSplit,
+				tabGroup,
 				Number.MAX_SAFE_INTEGER,
 			);
 		}
@@ -571,11 +726,17 @@ export default class AgentClientPlugin extends Plugin {
 	 * Open a new chat view with a specific agent.
 	 * Always creates a new view (doesn't reuse existing).
 	 */
-	async openNewChatViewWithAgent(agentId: string): Promise<void> {
-		const leaf = this.createNewChatLeaf(true);
+	async openNewChatViewWithAgent(
+		agentId: string,
+		locationOverride?: "right-pane",
+	): Promise<string | null> {
+		const leaf =
+			locationOverride === "right-pane"
+				? this.createSidebarTab("right")
+				: this.createNewChatLeaf(true);
 		if (!leaf) {
 			getLogger().warn("[AgentClient] Failed to create new leaf");
-			return;
+			return null;
 		}
 
 		await leaf.setViewState({
@@ -585,6 +746,8 @@ export default class AgentClientPlugin extends Plugin {
 		});
 
 		await this.app.workspace.revealLeaf(leaf);
+		const view = leaf.view as ChatView | null;
+		const viewId = view?.viewId ?? null;
 
 		// Focus textarea after revealing the leaf
 		const viewContainerEl = leaf.view?.containerEl;
@@ -598,6 +761,7 @@ export default class AgentClientPlugin extends Plugin {
 				}
 			}, 0);
 		}
+		return viewId;
 	}
 
 	/**
@@ -612,6 +776,37 @@ export default class AgentClientPlugin extends Plugin {
 		// FloatingViewContainer will create viewId as "floating-chat-{instanceId}"
 		const instanceId = String(this.floatingChatCounter++);
 		createFloatingChat(this, instanceId, initialExpanded, initialPosition);
+	}
+
+	findNearestEmbeddedChat(
+		sourcePath: string,
+		lineStart: number,
+	): string | null {
+		// Prefer the embedded chat closest at/above the target line (a button
+		// usually sits just below its chat). If none are at/above, fall back to
+		// the highest chat below. The secondary sort by lineStart keeps the
+		// "below" pick deterministic without relying on registry iteration
+		// order (which shifts when a block unregisters/re-registers on
+		// re-render).
+		let above: EmbeddedChatViewContainer | null = null;
+		let aboveDistance = Number.POSITIVE_INFINITY;
+		let below: EmbeddedChatViewContainer | null = null;
+
+		for (const container of this.viewRegistry.getByType("embedded")) {
+			if (!(container instanceof EmbeddedChatViewContainer)) continue;
+			if (container.sourcePath !== sourcePath) continue;
+			const distance = lineStart - container.lineStart;
+			if (distance >= 0) {
+				if (distance < aboveDistance) {
+					above = container;
+					aboveDistance = distance;
+				}
+			} else if (!below || container.lineStart < below.lineStart) {
+				below = container;
+			}
+		}
+
+		return (above ?? below)?.viewId ?? null;
 	}
 
 	/**
@@ -645,45 +840,320 @@ export default class AgentClientPlugin extends Plugin {
 	}
 
 	/**
-	 * Get all available agents (claude, codex, gemini, custom)
+	 * Render an `agent-client` code block. Dispatches to embedded chat or
+	 * quick-action button based on the parsed `type` field.
 	 */
-	getAvailableAgents(): Array<{ id: string; displayName: string }> {
-		return [
-			{
-				id: this.settings.claude.id,
-				displayName:
-					this.settings.claude.displayName || this.settings.claude.id,
-			},
-			{
-				id: this.settings.codex.id,
-				displayName:
-					this.settings.codex.displayName || this.settings.codex.id,
-			},
-			{
-				id: this.settings.gemini.id,
-				displayName:
-					this.settings.gemini.displayName || this.settings.gemini.id,
-			},
-			...this.settings.customAgents.map((agent) => ({
-				id: agent.id,
-				displayName: agent.displayName || agent.id,
-			})),
-		];
+	private renderAgentBlock(
+		source: string,
+		el: HTMLElement,
+		ctx: MarkdownPostProcessorContext,
+	): void {
+		const child = new MarkdownRenderChild(el);
+		const parsed = parseAgentBlock(source);
+
+		if (!parsed.ok) {
+			const errorEl = el.createDiv({
+				cls: "agent-client-code-block-error",
+			});
+			errorEl.createSpan({
+				cls: "agent-client-code-block-error-label",
+				text: "agent-client block error: ",
+			});
+			errorEl.createSpan({ text: parsed.error });
+			const sourceEl = errorEl.createEl("pre", {
+				cls: "agent-client-code-block-error-source",
+			});
+			sourceEl.setText(source);
+			ctx.addChild(child);
+			return;
+		}
+
+		// Collect non-fatal warnings: parser warnings plus a mount-side check
+		// on the pinned agent id (#28). Copy the parser array rather than
+		// mutating it, since parse results may be shared once cached.
+		// Warnings match actual behavior, which differs by block type: a chat
+		// block spawns the pinned agent as-is (unknown → startup error), a
+		// button block falls back to the default agent when the id is unknown.
+		// Both use a pinned agent even while it is disabled. Computed at
+		// render time — a later toggle doesn't update an already-rendered
+		// block (known limitation).
+		const warnings = parsed.warnings ? [...parsed.warnings] : [];
+		const requestedAgent = parsed.config.agent;
+		if (requestedAgent) {
+			const agentSettings = findAgentSettings(
+				this.settings,
+				requestedAgent,
+			);
+			if (!agentSettings) {
+				warnings.push(
+					parsed.config.type === "chat"
+						? `Unknown agent "${requestedAgent}" — this block will fail to start. Check the agent id in Settings → Agent Client.`
+						: `Unknown agent "${requestedAgent}", using the default agent instead.`,
+				);
+			} else if (!isAgentEnabled(agentSettings)) {
+				warnings.push(
+					`Agent "${requestedAgent}" is disabled in settings; this block pins it and will still use it.`,
+				);
+			}
+		}
+
+		if (warnings.length > 0) {
+			const warnEl = el.createDiv({
+				cls: "agent-client-code-block-warning",
+			});
+			for (const warning of warnings) {
+				warnEl.createDiv({
+					cls: "agent-client-code-block-warning-item",
+					text: warning,
+				});
+			}
+		}
+
+		const sectionInfo = ctx.getSectionInfo(el);
+		const sourcePath = ctx.sourcePath || "";
+		const lineStart = sectionInfo?.lineStart ?? 0;
+		const blockId = `${sourcePath || "untitled"}:${lineStart}`;
+
+		if (parsed.config.type === "chat") {
+			// Persist blocks lacking an id get a stable id auto-injected into
+			// the fence, so the device-local persist mapping survives note
+			// rename/move. Requires real section bounds. Runs once: the
+			// re-render the edit triggers sees config.id and the guard inside
+			// ensureEmbedId short-circuits.
+			if (parsed.config.persist && !parsed.config.id && sectionInfo) {
+				void this.ensureEmbedId(
+					sourcePath,
+					sectionInfo.lineStart,
+					sectionInfo.lineEnd,
+				);
+			}
+			const container = mountCodeBlockChat(this, el, parsed.config, {
+				sourcePath,
+				blockId: parsed.config.id ?? blockId,
+				lineStart,
+			});
+			child.onunload = () => container.unmount();
+		} else {
+			const root = mountAgentButtonBlock(this, el, parsed.config, {
+				sourcePath,
+				lineStart,
+			});
+			child.onunload = () => root.unmount();
+		}
+		ctx.addChild(child);
 	}
 
 	/**
-	 * Register commands for each configured agent
+	 * Inject a generated stable id into a persist chat fence that lacks one.
+	 *
+	 * Device-neutral persist mapping keys on this id (not the note path), so
+	 * rename/move stays safe. Idempotent: an in-flight guard prevents
+	 * concurrent double-injection, and a content check skips fences that
+	 * already declare an id (covering the re-render the edit itself triggers).
+	 *
+	 * Uses app.vault.process (atomic read-modify-write) rather than
+	 * vault.modify, per the settled design.
+	 */
+	private async ensureEmbedId(
+		sourcePath: string,
+		lineStart: number,
+		lineEnd: number,
+	): Promise<void> {
+		if (!sourcePath) return;
+		const guardKey = `${sourcePath}:${lineStart}`;
+		if (this.embedIdInjectionInFlight.has(guardKey)) return;
+
+		const file = this.app.vault.getAbstractFileByPath(sourcePath);
+		if (!(file instanceof TFile)) return;
+
+		this.embedIdInjectionInFlight.add(guardKey);
+		try {
+			await this.app.vault.process(file, (content) => {
+				const lines = content.split("\n");
+				// Bounds + fence sanity: section info must still match the file.
+				if (
+					lineStart < 0 ||
+					lineEnd >= lines.length ||
+					lineStart >= lineEnd
+				) {
+					return content;
+				}
+				// Fence sanity: the captured section may be stale (a user
+				// edit can move/replace the block before this async pass).
+				// Require the live fence to still be an agent-client/agent
+				// fence so an unrelated fence never gets an id spliced in.
+				if (
+					!/^\s*`{3,}\s*(agent-client|agent)(?:\s|$)/.test(
+						lines[lineStart],
+					)
+				) {
+					return content;
+				}
+
+				// Re-validate the live body through the real parser (single
+				// source of truth). Inject only when it is still a persist
+				// chat block lacking an id — this also short-circuits the
+				// re-render the edit itself triggers.
+				const body = lines.slice(lineStart + 1, lineEnd);
+				const liveParsed = parseAgentBlock(body.join("\n"));
+				if (
+					!liveParsed.ok ||
+					liveParsed.config.type !== "chat" ||
+					!liveParsed.config.persist ||
+					liveParsed.config.id
+				) {
+					return content;
+				}
+
+				const indent = lines[lineStart].match(/^\s*/)?.[0] ?? "";
+				lines.splice(
+					lineStart + 1,
+					0,
+					`${indent}id: ${generateEmbedId()}`,
+				);
+				return lines.join("\n");
+			});
+		} catch (error) {
+			getLogger().error(
+				`[AgentClient] Failed to inject embed id: ${error}`,
+			);
+		} finally {
+			this.embedIdInjectionInFlight.delete(guardKey);
+		}
+	}
+
+	/**
+	 * Open a chat view and inject a prompt into it. Used by quick-action
+	 * buttons (embedded code blocks, command palette entries, etc.).
+	 *
+	 * Delivers the prompt to the target ChatPanel via the pending-prompt
+	 * registry (see registerPendingPromptHandler): synchronous if the panel is
+	 * already mounted, otherwise queued and drained on its next mount.
+	 */
+	async runPromptInChat(options: {
+		agentId: string;
+		prompt: string;
+		autoSend: boolean;
+		viewType: "right-pane" | "floating" | "editor-tab" | "embedded";
+		sourcePath?: string;
+		lineStart?: number;
+	}): Promise<void> {
+		const { agentId, prompt, autoSend, viewType, sourcePath, lineStart } =
+			options;
+		let targetViewId: string | null = null;
+
+		if (viewType === "embedded") {
+			targetViewId =
+				sourcePath && typeof lineStart === "number"
+					? this.findNearestEmbeddedChat(sourcePath, lineStart)
+					: null;
+			if (!targetViewId) {
+				new Notice("No embedded chat block found in this note.");
+				return;
+			}
+		} else if (viewType === "floating") {
+			const counterBefore = this.floatingChatCounter;
+			this.openNewFloatingChat(true);
+			targetViewId = `floating-chat-${counterBefore}`;
+		} else if (viewType === "editor-tab") {
+			const leaf = this.app.workspace.getLeaf("tab");
+			await leaf.setViewState({
+				type: VIEW_TYPE_CHAT,
+				active: true,
+				state: { initialAgentId: agentId },
+			});
+			await this.app.workspace.revealLeaf(leaf);
+			const view = leaf.view as ChatView;
+			targetViewId = view?.viewId ?? null;
+		} else {
+			// viewType === "right-pane": honor it literally, independent of the
+			// user's chatViewLocation default (floating/editor-tab handled above).
+			targetViewId = await this.openNewChatViewWithAgent(
+				agentId,
+				"right-pane",
+			);
+		}
+
+		if (!targetViewId) return;
+
+		// Deterministic handshake: deliver now if the target ChatPanel has
+		// registered its handler, otherwise queue until it mounts. Replaces a
+		// 100ms setTimeout + workspace broadcast that could drop the prompt if
+		// the React root mounted late.
+		this.deliverPrompt(targetViewId, prompt, autoSend);
+	}
+
+	/**
+	 * Register a ChatPanel's pending-prompt handler (called on mount). If a
+	 * prompt was queued before the panel mounted (runPromptInChat ran first),
+	 * it is delivered synchronously here. Returns an unregister function.
+	 */
+	registerPendingPromptHandler(
+		viewId: string,
+		handler: (prompt: string, autoSend: boolean) => void,
+	): () => void {
+		this._pendingPromptHandlers.set(viewId, handler);
+		const queued = this._pendingPrompts.get(viewId);
+		if (queued) {
+			this._pendingPrompts.delete(viewId);
+			for (const item of queued) {
+				handler(item.prompt, item.autoSend);
+			}
+		}
+		return () => {
+			if (this._pendingPromptHandlers.get(viewId) === handler) {
+				this._pendingPromptHandlers.delete(viewId);
+			}
+		};
+	}
+
+	private deliverPrompt(
+		viewId: string,
+		prompt: string,
+		autoSend: boolean,
+	): void {
+		const handler = this._pendingPromptHandlers.get(viewId);
+		if (handler) {
+			handler(prompt, autoSend);
+		} else {
+			// Panel not mounted yet; drained by registerPendingPromptHandler.
+			const queue = this._pendingPrompts.get(viewId);
+			if (queue) {
+				queue.push({ prompt, autoSend });
+			} else {
+				this._pendingPrompts.set(viewId, [{ prompt, autoSend }]);
+			}
+		}
+	}
+
+	/**
+	 * Get all available agents (preset + custom). Delegates to the single
+	 * enumeration implementation in session-helpers.
+	 */
+	getAvailableAgents(): Array<{ id: string; displayName: string }> {
+		return getAvailableAgentsFromSettings(this.settings);
+	}
+
+	/**
+	 * Register commands for each configured agent.
+	 *
+	 * All presets register unconditionally; a checkCallback hides the command
+	 * while its agent is disabled, so the palette follows the Enabled toggles
+	 * without re-registration. Custom agents remain a load-time snapshot
+	 * (a newly added custom gets its command after a reload — existing
+	 * limitation), but their enabled state is also checked live.
 	 */
 	private registerAgentCommands(): void {
-		const agents = this.getAvailableAgents();
-
-		for (const agent of agents) {
+		for (const agent of getAllAgentsFromSettings(this.settings)) {
 			this.addCommand({
 				id: `switch-agent-to-${agent.id}`,
 				name: `Switch agent to ${agent.displayName}`,
-				callback: () => {
+				checkCallback: (checking) => {
+					const found = findAgentSettings(this.settings, agent.id);
+					if (!found || !isAgentEnabled(found)) return false;
+					if (checking) return true;
 					this.app.workspace.trigger(
-						"agent-client:new-chat-requested" as "quit",
+						"agent-client:new-chat-requested",
 						this.lastActiveChatViewId,
 						agent.id,
 					);
@@ -698,7 +1168,7 @@ export default class AgentClientPlugin extends Plugin {
 			name: "Approve active permission",
 			callback: () => {
 				this.app.workspace.trigger(
-					"agent-client:approve-active-permission" as "quit",
+					"agent-client:approve-active-permission",
 					this.lastActiveChatViewId,
 				);
 			},
@@ -709,7 +1179,7 @@ export default class AgentClientPlugin extends Plugin {
 			name: "Reject active permission",
 			callback: () => {
 				this.app.workspace.trigger(
-					"agent-client:reject-active-permission" as "quit",
+					"agent-client:reject-active-permission",
 					this.lastActiveChatViewId,
 				);
 			},
@@ -720,7 +1190,7 @@ export default class AgentClientPlugin extends Plugin {
 			name: "Toggle auto-mention",
 			callback: () => {
 				this.app.workspace.trigger(
-					"agent-client:toggle-auto-mention" as "quit",
+					"agent-client:toggle-auto-mention",
 					this.lastActiveChatViewId,
 				);
 			},
@@ -731,7 +1201,7 @@ export default class AgentClientPlugin extends Plugin {
 			name: "New chat",
 			callback: () => {
 				this.app.workspace.trigger(
-					"agent-client:new-chat-requested" as "quit",
+					"agent-client:new-chat-requested",
 					this.lastActiveChatViewId,
 				);
 			},
@@ -742,7 +1212,7 @@ export default class AgentClientPlugin extends Plugin {
 			name: "Cancel current message",
 			callback: () => {
 				this.app.workspace.trigger(
-					"agent-client:cancel-message" as "quit",
+					"agent-client:cancel-message",
 					this.lastActiveChatViewId,
 				);
 			},
@@ -753,7 +1223,7 @@ export default class AgentClientPlugin extends Plugin {
 			name: "Export chat",
 			callback: () => {
 				this.app.workspace.trigger(
-					"agent-client:export-chat" as "quit",
+					"agent-client:export-chat",
 					this.lastActiveChatViewId,
 				);
 			},
@@ -863,99 +1333,60 @@ export default class AgentClientPlugin extends Plugin {
 		const D = DEFAULT_SETTINGS;
 		let migratedSecrets = false;
 
-		// Extract agent sub-objects
-		const rc = obj(raw.claude) ?? {};
-		const rk = obj(raw.codex) ?? {};
-		const rg = obj(raw.gemini) ?? {};
+		// Extract settings sub-objects
 		const re = obj(raw.exportSettings) ?? {};
 		const rd = obj(raw.displaySettings) ?? {};
 
-		// Normalize custom agents
+		// Normalize custom agents. Preset ids are reserved: a custom that
+		// collides with one has always been dead weight (preset-first
+		// resolution), so suffix-renaming it changes no session behavior.
 		const customAgents = Array.isArray(raw.customAgents)
 			? ensureUniqueCustomAgentIds(
 					raw.customAgents.map((a: unknown) =>
 						normalizeCustomAgent(obj(a) ?? {}),
 					),
+					PRESET_AGENTS.map((def) => def.presetId),
 				)
 			: [];
 
 		// Migration: defaultAgentId ← activeAgentId (old name)
 		const availableAgentIds = [
-			D.claude.id,
-			D.codex.id,
-			D.gemini.id,
+			...PRESET_AGENTS.map((def) => def.presetId),
 			...customAgents.map((a) => a.id),
 		];
-		const rawDefaultId =
-			str(raw.defaultAgentId, "") || str(raw.activeAgentId, "");
 		const defaultAgentId =
-			rawDefaultId && availableAgentIds.includes(rawDefaultId)
-				? rawDefaultId
-				: availableAgentIds[0] || D.claude.id;
+			resolveDefaultAgentId(raw, availableAgentIds) ||
+			PRESET_AGENTS[0].presetId;
+
+		// Secret-storage side effects (writes + Notices) are injected into the
+		// pure normalizer; called only for presets with apiKey.legacy wiring.
+		const migrateApiKey: ApiKeyMigrator = ({
+			def,
+			current,
+			legacyPlain,
+		}) => {
+			const legacy = def.apiKey?.legacy;
+			if (!legacy) {
+				return current;
+			}
+			return this.migrateLegacyApiKey(
+				legacy.defaultSecretId,
+				legacy.fallbackSecretId,
+				current,
+				legacyPlain,
+				legacy.noticeLabel,
+				() => {
+					migratedSecrets = true;
+				},
+			);
+		};
 
 		this.settings = {
-			claude: {
-				id: D.claude.id, // Fixed — never from raw
-				displayName: str(rc.displayName, D.claude.displayName),
-				apiKeySecretId: this.migrateLegacyApiKey(
-					"claude-api-key",
-					"agent-client-claude-api-key",
-					str(rc.apiKeySecretId, D.claude.apiKeySecretId),
-					str(rc.apiKey, ""),
-					"Claude",
-					() => {
-						migratedSecrets = true;
-					},
-				),
-				// Migration: claude.command ← claudeCodeAcpCommandPath (old name)
-				command:
-					str(rc.command, "") ||
-					str(raw.claudeCodeAcpCommandPath, "") ||
-					D.claude.command,
-				args: sanitizeArgs(rc.args),
-				env: normalizeEnvVars(rc.env),
-			},
-			codex: {
-				id: D.codex.id,
-				displayName: str(rk.displayName, D.codex.displayName),
-				apiKeySecretId: this.migrateLegacyApiKey(
-					"openai-api-key",
-					"agent-client-openai-api-key",
-					str(rk.apiKeySecretId, D.codex.apiKeySecretId),
-					str(rk.apiKey, ""),
-					"Codex",
-					() => {
-						migratedSecrets = true;
-					},
-				),
-				command: str(rk.command, "") || D.codex.command,
-				args: sanitizeArgs(rk.args),
-				env: normalizeEnvVars(rk.env),
-			},
-			gemini: {
-				id: D.gemini.id,
-				displayName: str(rg.displayName, D.gemini.displayName),
-				apiKeySecretId: this.migrateLegacyApiKey(
-					"gemini-api-key",
-					"agent-client-gemini-api-key",
-					str(rg.apiKeySecretId, D.gemini.apiKeySecretId),
-					str(rg.apiKey, ""),
-					"Gemini",
-					() => {
-						migratedSecrets = true;
-					},
-				),
-				// Migration: gemini.command ← geminiCommandPath (old name)
-				command:
-					str(rg.command, "") ||
-					str(raw.geminiCommandPath, "") ||
-					D.gemini.command,
-				args:
-					sanitizeArgs(rg.args).length > 0
-						? sanitizeArgs(rg.args)
-						: D.gemini.args,
-				env: normalizeEnvVars(rg.env),
-			},
+			presetAgents: normalizePresetAgents(
+				raw,
+				PRESET_AGENTS,
+				migrateApiKey,
+			),
 			customAgents,
 			defaultAgentId,
 			autoAllowPermissions: bool(
@@ -966,6 +1397,10 @@ export default class AgentClientPlugin extends Plugin {
 				raw.autoMentionActiveNote,
 				D.autoMentionActiveNote,
 			),
+			expandWikilinkContext: bool(
+				raw.expandWikilinkContext,
+				D.expandWikilinkContext,
+			),
 			enableSystemNotifications: bool(
 				raw.enableSystemNotifications,
 				D.enableSystemNotifications,
@@ -975,7 +1410,7 @@ export default class AgentClientPlugin extends Plugin {
 				return {
 					enabled: bool(rp.enabled, D.promptInjection.enabled),
 					latex: bool(rp.latex, D.promptInjection.latex),
-				wikiLinks: bool(rp.wikiLinks, D.promptInjection.wikiLinks),
+					wikiLinks: bool(rp.wikiLinks, D.promptInjection.wikiLinks),
 					tables: bool(rp.tables, D.promptInjection.tables),
 				};
 			})(),
@@ -1063,6 +1498,7 @@ export default class AgentClientPlugin extends Plugin {
 				: D.savedSessions,
 			lastUsedModels: strRecord(raw.lastUsedModels),
 			lastUsedModes: strRecord(raw.lastUsedModes),
+			lastUsedConfigOptions: nestedStrRecord(raw.lastUsedConfigOptions),
 			// Migration: enableFloatingChat ← showFloatingButton (old name)
 			enableFloatingChat: bool(
 				raw.enableFloatingChat,
@@ -1084,6 +1520,7 @@ export default class AgentClientPlugin extends Plugin {
 			floatingButtonPosition: xyPoint(raw.floatingButtonPosition),
 		};
 
+		this.ensureAtLeastOneEnabled();
 		this.ensureDefaultAgentId();
 
 		if (migratedSecrets) {
@@ -1249,21 +1686,26 @@ export default class AgentClientPlugin extends Plugin {
 
 	ensureDefaultAgentId(): void {
 		const availableIds = this.collectAvailableAgentIds();
-		if (availableIds.length === 0) {
-			this.settings.defaultAgentId = DEFAULT_SETTINGS.claude.id;
-			return;
-		}
 		if (!availableIds.includes(this.settings.defaultAgentId)) {
-			this.settings.defaultAgentId = availableIds[0];
+			this.settings.defaultAgentId = firstEnabledAgentId(this.settings);
+		}
+	}
+
+	/**
+	 * Repair the "everything disabled" state by re-enabling the first preset.
+	 * The settings UI refuses to disable the last enabled agent, so this is a
+	 * backstop for load-time data and indirect paths (custom deletion).
+	 */
+	ensureAtLeastOneEnabled(): void {
+		const repaired = repairNoEnabledAgents(this.settings);
+		if (repaired) {
+			this.settings.presetAgents = repaired;
 		}
 	}
 
 	private collectAvailableAgentIds(): string[] {
 		const ids = new Set<string>();
-		ids.add(this.settings.claude.id);
-		ids.add(this.settings.codex.id);
-		ids.add(this.settings.gemini.id);
-		for (const agent of this.settings.customAgents) {
+		for (const agent of this.getAvailableAgents()) {
 			if (agent.id && agent.id.length > 0) {
 				ids.add(agent.id);
 			}

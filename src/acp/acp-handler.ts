@@ -9,9 +9,9 @@ import type { Logger } from "../utils/logger";
 /**
  * Handles incoming ACP protocol events from the agent.
  *
- * Implements the acp.Client interface to receive session updates,
- * permission requests, and terminal operations from the SDK's
- * ClientSideConnection dispatch.
+ * These methods are registered by ACP method name on the client app
+ * (acp.client(...)) in AcpClient, and receive session updates, permission
+ * requests, and terminal operations dispatched by the SDK connection.
  *
  * This class does not initiate communication — that is AcpClient's role.
  * It only reacts to events from the agent side.
@@ -61,7 +61,7 @@ export class AcpHandler {
 	}
 
 	// ====================================================================
-	// ACP Client Protocol Handlers (called by ClientSideConnection)
+	// ACP Client Protocol Handlers (registered on the client app)
 	// ====================================================================
 
 	sessionUpdate(params: acp.SessionNotification): Promise<void> {
@@ -168,33 +168,19 @@ export class AcpHandler {
 	}
 
 	// ====================================================================
-	// ACP Extension Handlers
-	// ====================================================================
-
-	async extNotification(
-		method: string,
-		params: Record<string, unknown>,
-	): Promise<void> {
-		this.logger.log(
-			`[AcpHandler] Extension notification received: ${method}`,
-			params,
-		);
-	}
-
-	// ====================================================================
 	// File System Stubs
 	// ====================================================================
 
-	readTextFile(params: acp.ReadTextFileRequest) {
+	readTextFile(_params: acp.ReadTextFileRequest) {
 		return Promise.resolve({ content: "" });
 	}
 
-	writeTextFile(params: acp.WriteTextFileRequest) {
+	writeTextFile(_params: acp.WriteTextFileRequest) {
 		return Promise.resolve({});
 	}
 
 	// ====================================================================
-	// Terminal Operations (called by ClientSideConnection)
+	// Terminal Operations (registered on the client app)
 	// ====================================================================
 
 	createTerminal(
@@ -232,8 +218,8 @@ export class AcpHandler {
 	}
 
 	killTerminal(
-		params: acp.KillTerminalCommandRequest,
-	): Promise<acp.KillTerminalCommandResponse> {
+		params: acp.KillTerminalRequest,
+	): Promise<acp.KillTerminalResponse> {
 		const success = this.terminalManager.killTerminal(params.terminalId);
 		if (!success) {
 			throw new Error(`Terminal ${params.terminalId} not found`);

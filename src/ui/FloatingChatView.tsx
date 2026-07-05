@@ -6,6 +6,7 @@ import type AgentClientPlugin from "../plugin";
 import type {
 	IChatViewContainer,
 	ChatViewType,
+	SessionStatus,
 } from "../services/view-registry";
 import type { ChatInputState } from "../types/chat";
 
@@ -83,7 +84,7 @@ export class FloatingViewContainer implements IChatViewContainer {
 		this.plugin = plugin;
 		// viewId format: "floating-chat-{instanceId}" to match adapter key
 		this.viewId = `floating-chat-${instanceId}`;
-		this.containerEl = document.body.createDiv({
+		this.containerEl = activeDocument.body.createDiv({
 			cls: "agent-client-floating-view-root",
 		});
 	}
@@ -142,6 +143,22 @@ export class FloatingViewContainer implements IChatViewContainer {
 		return this.callbacks?.getDisplayName() ?? "Chat";
 	}
 
+	getSessionStatus(): SessionStatus {
+		return this.callbacks?.getSessionStatus() ?? "disconnected";
+	}
+
+	getSessionTitle(): string {
+		return this.callbacks?.getSessionTitle() ?? "New session";
+	}
+
+	getSessionId(): string | null {
+		return this.callbacks?.getSessionId() ?? null;
+	}
+
+	closeContainer(): void {
+		this.unmount();
+	}
+
 	onActivate(): void {
 		this.containerEl.classList.add("is-focused");
 	}
@@ -157,7 +174,7 @@ export class FloatingViewContainer implements IChatViewContainer {
 			this.setExpanded?.(true);
 		}
 		// Focus after next render (expansion may need a frame)
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			const textarea = this.containerRefEl?.querySelector(
 				"textarea.agent-client-chat-input-textarea",
 			);
@@ -170,7 +187,7 @@ export class FloatingViewContainer implements IChatViewContainer {
 	hasFocus(): boolean {
 		return (
 			this.isExpandedState &&
-			(this.containerRefEl?.contains(document.activeElement) ?? false)
+			(this.containerRefEl?.contains(activeDocument.activeElement) ?? false)
 		);
 	}
 
@@ -411,10 +428,10 @@ function FloatingChatComponent({
 			}
 		};
 
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			void saveSize();
-		}, 500); // Debounce save
-		return () => clearTimeout(timer);
+		}, 500);
+		return () => window.clearTimeout(timer);
 	}, [size, plugin, settings.floatingWindowSize]);
 
 	// Save position to settings
@@ -432,10 +449,10 @@ function FloatingChatComponent({
 			}
 		};
 
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			void savePosition();
-		}, 500); // Debounce save
-		return () => clearTimeout(timer);
+		}, 500);
+		return () => window.clearTimeout(timer);
 	}, [position, plugin, settings.floatingWindowPosition]);
 
 	// ============================================================

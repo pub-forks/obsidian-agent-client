@@ -9,10 +9,14 @@
 </p>
 
 <p align="center">
+  <a href="https://community.obsidian.md/plugins/agent-client" target="_blank"><img src="https://img.shields.io/badge/Add%20to%20Obsidian-7c3aed?logo=obsidian&logoColor=white&style=for-the-badge" alt="Add to Obsidian"></a>
+</p>
+
+<p align="center">
   <a href="https://www.buymeacoffee.com/rait09" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="180" height="50" ></a>
 </p>
 
-AIエージェント（Claude Code、Codex、Gemini CLI）をObsidianに直接統合。Vault内からAIアシスタントとチャットできます。
+AIエージェント（Claude Code、Codex、Gemini CLI、Mistral Vibe）をObsidianに直接統合。Vault内からAIアシスタントとチャットできます。
 
 このプラグインは、Zed の [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol) で構築されています。
 
@@ -20,10 +24,10 @@ https://github.com/user-attachments/assets/1c538349-b3fb-44dd-a163-7331cbca7824
 
 ## 機能
 
-- **ノートメンション**: `@ノート名`でノートを参照
+- **ノートメンション**: `@ノート名`でノートを参照（ノート内の `[[wikilink]]` の解決済みパスもエージェントに渡る）
 - **画像添付**: チャットに画像をペーストまたはドラッグ&ドロップ
 - **スラッシュコマンド**: エージェントが提供する`/`コマンドを使用
-- **マルチエージェント**: Claude Code、Codex、Gemini CLI、カスタムエージェントを切り替え
+- **マルチエージェント**: Claude Code、Codex、Gemini CLI、Mistral Vibe、カスタムエージェントを切り替え
 - **マルチセッション**: 複数のエージェントを別々のビューで同時実行
 - **フローティングチャット**: 素早くアクセスできる折りたたみ可能なチャットウィンドウ
 - **モード・モデル切り替え**: チャット画面からAIモデルやエージェントモードを変更
@@ -34,7 +38,15 @@ https://github.com/user-attachments/assets/1c538349-b3fb-44dd-a163-7331cbca7824
 
 ## インストール
 
-### BRAT経由（推奨）
+### コミュニティプラグインから（推奨）
+
+1. **設定 → コミュニティプラグイン → 閲覧** を開く
+2. **「Agent Client」** を検索
+3. **インストール** → **有効化** をクリック
+
+### BRAT経由（プレリリース版）
+
+コミュニティプラグインに公開される前のプレリリース版を試すには:
 
 1. [BRAT](https://github.com/TfTHacker/obsidian42-brat) プラグインをインストール
 2. **設定 → BRAT → Add Beta Plugin** に移動
@@ -74,7 +86,7 @@ https://github.com/user-attachments/assets/1c538349-b3fb-44dd-a163-7331cbca7824
 
 4. **設定 → Agent Client** で設定:
    - **Node.js path**: 例: `/usr/local/bin/node`
-   - **Built-in agents → Claude Code → Path**: 例: `/usr/local/bin/claude-agent-acp`（`claude`ではない）
+   - **Preset agents → Claude Code → Path**: 例: `/usr/local/bin/claude-agent-acp`（`claude`ではない）
    - **API key**: キーを追加、またはCLIでログイン済みの場合は空欄
 
 5. **チャット開始**: リボンのロボットアイコンをクリック
@@ -84,7 +96,8 @@ https://github.com/user-attachments/assets/1c538349-b3fb-44dd-a163-7331cbca7824
 - [Claude Code](https://rait-09.github.io/obsidian-agent-client/agent-setup/claude-code.html)
 - [Codex](https://rait-09.github.io/obsidian-agent-client/agent-setup/codex.html)
 - [Gemini CLI](https://rait-09.github.io/obsidian-agent-client/agent-setup/gemini-cli.html)
-- [カスタムエージェント](https://rait-09.github.io/obsidian-agent-client/agent-setup/custom-agents.html)（OpenCode、Qwen Code、Kiro、Mistral Vibeなど）
+- [Mistral Vibe](https://rait-09.github.io/obsidian-agent-client/agent-setup/mistral-vibe.html)
+- [カスタムエージェント](https://rait-09.github.io/obsidian-agent-client/agent-setup/custom-agents.html)（OpenCode、Qwen Code、Kiroなど）
 
 **[ドキュメント全文](https://rait-09.github.io/obsidian-agent-client/)**
 

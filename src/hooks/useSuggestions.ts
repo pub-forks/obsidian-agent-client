@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import type { NoteMetadata, IVaultAccess } from "../services/vault-service";
 import {
 	detectMention,
@@ -90,6 +90,8 @@ export function useSuggestions(
 	vaultAccess: IVaultAccess,
 	plugin: AgentClientPlugin,
 	availableCommands: SlashCommand[],
+	autoMentionDefault: boolean,
+	pinnedActiveNote?: NoteMetadata | null,
 ): UseSuggestionsReturn {
 	// ============================================================
 	// Mention State
@@ -102,8 +104,17 @@ export function useSuggestions(
 	const [mentionContext, setMentionContext] = useState<MentionContext | null>(
 		null,
 	);
-	const [activeNote, setActiveNote] = useState<NoteMetadata | null>(null);
-	const [isAutoMentionDisabled, setIsAutoMentionDisabled] = useState(false);
+	const [activeNote, setActiveNote] = useState<NoteMetadata | null>(
+		pinnedActiveNote ?? null,
+	);
+	const [isAutoMentionDisabled, setIsAutoMentionDisabled] = useState(
+		!autoMentionDefault,
+	);
+
+	// Sync toggle when the setting changes at runtime (e.g. from plugin settings)
+	useEffect(() => {
+		setIsAutoMentionDisabled(!autoMentionDefault);
+	}, [autoMentionDefault]);
 
 	const mentionIsOpen =
 		mentionSuggestions.length > 0 && mentionContext !== null;
@@ -198,9 +209,13 @@ export function useSuggestions(
 	}, []);
 
 	const updateActiveNote = useCallback(async () => {
+		if (pinnedActiveNote) {
+			setActiveNote(pinnedActiveNote);
+			return;
+		}
 		const note = await vaultAccess.getActiveNote();
 		setActiveNote(note);
-	}, [vaultAccess]);
+	}, [vaultAccess, pinnedActiveNote]);
 
 	// ============================================================
 	// Command Callbacks
@@ -208,14 +223,8 @@ export function useSuggestions(
 
 	const commandUpdateSuggestions = useCallback(
 		(input: string, cursorPosition: number) => {
-			const wasOpen = commandSuggestions.length > 0;
-
 			// Slash commands only trigger at the very beginning of input
 			if (!input.startsWith("/")) {
-				// Re-enable auto-mention only if dropdown was showing
-				if (wasOpen) {
-					toggleAutoMention(false);
-				}
 				setCommandSuggestions([]);
 				setCommandSelectedIndex(0);
 				return;
@@ -229,8 +238,6 @@ export function useSuggestions(
 			if (afterSlash.includes(" ")) {
 				setCommandSuggestions([]);
 				setCommandSelectedIndex(0);
-				// Keep auto-mention disabled (slash command is still active)
-				toggleAutoMention(true);
 				return;
 			}
 
@@ -243,10 +250,8 @@ export function useSuggestions(
 
 			setCommandSuggestions(filtered);
 			setCommandSelectedIndex(0);
-			// Disable auto-mention when slash command is detected
-			toggleAutoMention(true);
 		},
-		[availableCommands, toggleAutoMention, commandSuggestions.length],
+		[availableCommands],
 	);
 
 	const commandSelectSuggestion = useCallback(

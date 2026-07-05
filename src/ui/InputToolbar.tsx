@@ -5,7 +5,6 @@ import { setIcon, Menu } from "obsidian";
 import {
 	flattenConfigSelectOptions,
 	type SessionModeState,
-	type SessionModelState,
 	type SessionUsage,
 	type SessionConfigOption,
 	type SessionConfigSelectGroup,
@@ -152,8 +151,6 @@ export interface InputToolbarProps {
 	onSendOrStop: () => void;
 	modes?: SessionModeState;
 	onModeChange?: (modeId: string) => void;
-	models?: SessionModelState;
-	onModelChange?: (modelId: string) => void;
 	configOptions?: SessionConfigOption[];
 	onConfigOptionChange?: (configId: string, value: string) => void;
 	usage?: SessionUsage;
@@ -167,8 +164,6 @@ export function InputToolbar({
 	onSendOrStop,
 	modes,
 	onModeChange,
-	models,
-	onModelChange,
 	configOptions,
 	onConfigOptionChange,
 	usage,
@@ -227,28 +222,10 @@ export function InputToolbar({
 		}));
 	}, [modes]);
 
-	const modelItems = useMemo<ToolbarDropdownItem[]>(() => {
-		if (!models?.availableModels) return [];
-		return models.availableModels.map((m) => ({
-			value: m.modelId,
-			label: m.name,
-		}));
-	}, [models]);
-
 	const currentModeLabel = useMemo(() => {
 		const id = modes?.currentModeId;
-		return (
-			modes?.availableModes?.find((m) => m.id === id)?.name ?? "Mode"
-		);
+		return modes?.availableModes?.find((m) => m.id === id)?.name ?? "Mode";
 	}, [modes]);
-
-	const currentModelLabel = useMemo(() => {
-		const id = models?.currentModelId;
-		return (
-			models?.availableModels?.find((m) => m.modelId === id)?.name ??
-			"Model"
-		);
-	}, [models]);
 
 	// ----- Render -----
 
@@ -269,63 +246,68 @@ export function InputToolbar({
 			)}
 
 			{/* Config Options (supersedes legacy mode/model selectors) */}
-			{configOptions && configOptions.length > 0
-				? configOptions.map((option) => {
-						const flatOptions = flattenConfigSelectOptions(
-							option.options,
-						);
-						if (flatOptions.length <= 1) return null;
+			{configOptions && configOptions.length > 0 ? (
+				configOptions.map((option) => {
+					// boolean options (ACP 0.28+) are carried as data but
+					// not yet rendered; only select options get a dropdown.
+					if (option.type !== "select") return null;
+					const flatOptions = flattenConfigSelectOptions(
+						option.options,
+					);
+					if (flatOptions.length <= 1) return null;
 
-						const isGrouped =
-							option.options.length > 0 &&
-							"group" in option.options[0];
+					const isGrouped =
+						option.options.length > 0 &&
+						"group" in option.options[0];
 
-						let items: ToolbarDropdownItem[];
-						if (isGrouped) {
-							items = [];
-							for (const group of option.options as SessionConfigSelectGroup[]) {
-								for (const opt of group.options) {
-									items.push({
-										value: opt.value,
-										label: `${group.name} / ${opt.name}`,
-										groupName: group.name,
-									});
-								}
+					let items: ToolbarDropdownItem[];
+					if (isGrouped) {
+						items = [];
+						for (const group of option.options as SessionConfigSelectGroup[]) {
+							for (const opt of group.options) {
+								items.push({
+									value: opt.value,
+									label: `${group.name} / ${opt.name}`,
+									groupName: group.name,
+								});
 							}
-						} else {
-							items = flatOptions.map((opt) => ({
-								value: opt.value,
-								label: opt.name,
-							}));
 						}
+					} else {
+						items = flatOptions.map((opt) => ({
+							value: opt.value,
+							label: opt.name,
+						}));
+					}
 
-						const currentItem = items.find(
-							(it) => it.value === option.currentValue,
-						);
-						const label = currentItem?.label ?? option.name;
-						const title = option.description ?? option.name;
+					const currentItem = items.find(
+						(it) => it.value === option.currentValue,
+					);
+					const label = currentItem?.label ?? option.name;
+					const title = option.description ?? option.name;
 
-						return (
-							<ToolbarDropdown
-								key={option.id}
-								label={label}
-								title={title}
-								items={items}
-								currentValue={option.currentValue}
-								onChange={(value) => {
-									onConfigOptionChange?.(option.id, value);
-								}}
-								className={
-									option.category
-										? `agent-client-config-selector-${option.category}`
-										: undefined
-								}
-							/>
-						);
-					})
-				: (
-					<>
-						{modes && modes.availableModes.length > 1 && onModeChange && (
+					return (
+						<ToolbarDropdown
+							key={option.id}
+							label={label}
+							title={title}
+							items={items}
+							currentValue={option.currentValue}
+							onChange={(value) => {
+								onConfigOptionChange?.(option.id, value);
+							}}
+							className={
+								option.category
+									? `agent-client-config-selector-${option.category}`
+									: undefined
+							}
+						/>
+					);
+				})
+			) : (
+				<>
+					{modes &&
+						modes.availableModes.length > 1 &&
+						onModeChange && (
 							<ToolbarDropdown
 								label={currentModeLabel}
 								title={
@@ -338,28 +320,8 @@ export function InputToolbar({
 								onChange={onModeChange}
 							/>
 						)}
-
-						{models &&
-							models.availableModels.length > 1 &&
-							onModelChange && (
-								<ToolbarDropdown
-									label={currentModelLabel}
-									title={
-										models.availableModels.find(
-											(m) =>
-												m.modelId ===
-												models.currentModelId,
-										)?.description ?? "Select model"
-									}
-									items={modelItems}
-									currentValue={
-										models.currentModelId ?? undefined
-									}
-									onChange={onModelChange}
-								/>
-							)}
-					</>
-				)}
+				</>
+			)}
 
 			{/* Send/Stop Button */}
 			<button

@@ -1,7 +1,7 @@
 # Agent Client Plugin - LLM Developer Guide
 
 ## Overview
-Obsidian plugin for AI agent interaction (Claude Code, Codex, Gemini CLI, custom agents) via ACP.
+Obsidian plugin for AI agent interaction (Claude Code, Codex, Gemini CLI, Mistral Vibe, custom agents) via ACP.
 
 **Tech**: React 19, TypeScript, Obsidian API, Agent Client Protocol (ACP)
 
@@ -12,7 +12,7 @@ src/
 ├── types/                       # Type definitions (no logic, no dependencies)
 │   ├── chat.ts                  # ChatMessage, MessageContent, PromptContent, AttachedFile, ActivePermission
 │   ├── session.ts               # ChatSession, SessionUpdate (12-type union), SessionInfo, Capabilities
-│   ├── agent.ts                 # AgentConfig, agent settings (Claude/Codex/Gemini/Custom)
+│   ├── agent.ts                 # BaseAgentSettings, PresetAgentUserSettings, CustomAgentSettings
 │   └── errors.ts                # AcpError, ProcessError, ErrorInfo
 ├── acp/                         # ACP protocol (SDK dependency confined here)
 │   ├── acp-client.ts            # Process lifecycle, UI-facing API (AcpClient class)
@@ -24,8 +24,9 @@ src/
 │   ├── vault-service.ts         # Vault access + fuzzy search + CM6 selection tracking
 │   ├── settings-service.ts      # Reactive settings store (observer pattern only)
 │   ├── session-storage.ts       # Session metadata + message file I/O (sessions/*.json)
-│   ├── settings-normalizer.ts   # Settings validation helpers (str, bool, num, enumVal, etc.)
-│   ├── session-helpers.ts       # Agent config building, API key injection (pure functions)
+│   ├── preset-agents.ts         # Static registry of preset (built-in) agents (PRESET_AGENTS)
+│   ├── settings-normalizer.ts   # Settings validation helpers + presetAgents normalization/migration
+│   ├── session-helpers.ts       # Agent enumeration/resolution, API key injection (pure functions)
 │   ├── session-state.ts         # Session state updates (legacy mode/model, config restore)
 │   ├── message-state.ts         # Message array transforms (upsert, merge, streaming apply)
 │   ├── message-sender.ts        # Prompt preparation + sending (pure functions)
@@ -175,8 +176,9 @@ FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand
 **VaultService**: Vault access + file index + fuzzy search + CM6 selection tracking
 **SettingsService**: Reactive settings store (observer pattern for useSyncExternalStore). Session storage delegated to SessionStorage.
 **SessionStorage**: Session metadata CRUD (in plugin settings) + message file I/O (sessions/*.json)
-**settings-normalizer**: Validation helpers (str, bool, num, enumVal, obj, strRecord, xyPoint) + toAgentConfig + parseChatFontSize
-**session-helpers**: Pure functions — buildAgentConfigWithApiKey, findAgentSettings, getAvailableAgents
+**preset-agents**: Static registry (`PRESET_AGENTS`) of preset agent definitions — identity, spawn defaults, legacy data.json migration keys, API-key wiring, install hints, settings-UI copy. User overrides live in `settings.presetAgents[presetId]`
+**settings-normalizer**: Validation helpers (str, bool, num, enumVal, obj, strRecord, xyPoint) + toAgentConfig + parseChatFontSize + normalizePresetAgents (legacy data.json migration; secret-storage side effects injected via ApiKeyMigrator)
+**session-helpers**: Pure functions — buildAgentConfigWithApiKey, findAgentSettings, getAvailableAgentsFromSettings (single enumeration implementation; plugin.getAvailableAgents delegates here)
 **session-state**: Pure functions — applyLegacyValue, tryRestoreConfigOption, restoreLegacyConfig
 **message-state**: Pure functions — applySingleUpdate, applyUpsertToolCall, mergeToolCallContent, findActivePermission, selectOption
 **message-sender**: Pure functions — preparePrompt (embedded context vs XML text, shared helpers), sendPreparedPrompt (auth retry)
@@ -284,11 +286,19 @@ interface ISettingsAccess {
 5. Pass state/callbacks to child components as props
 6. Wrap return object in `useMemo` if passed as dependency to other hooks
 
-### Add Agent Type
-1. Add settings type in `types/agent.ts`
-2. Add config and defaults in `plugin.ts`
-3. Add API key injection in `services/session-helpers.ts`
-4. Update `ui/SettingsTab.ts` for configuration UI
+### Add Preset Agent
+1. Add one entry to `PRESET_AGENTS` in `services/preset-agents.ts`
+   (presetId, defaults, optional apiKey wiring, install hint, settings copy, docsPage).
+   Settings storage, enumeration, API key injection, and the settings UI are all
+   registry-driven — no per-agent code elsewhere.
+2. Add docs — the full file list (do not shorten it; every past addition that
+   skipped one needed a follow-up commit):
+   `docs/agent-setup/<agent>.md` (new page), `docs/.vitepress/config.mts` (sidebar),
+   `docs/index.md`, `docs/agent-setup/index.md`, `docs/getting-started/index.md`,
+   `docs/getting-started/quick-start.md`, `docs/help/faq.md`,
+   `docs/help/troubleshooting.md`, `docs/reference/acp-support.md`,
+   `docs/usage/context-files.md`, `README.md`, `README.ja.md`,
+   and the Agents list at the bottom of this file
 
 ### Modify Message Types
 1. Update `ChatMessage`/`MessageContent` in `types/chat.ts`
@@ -323,6 +333,7 @@ interface ISettingsAccess {
 - Claude Code: `@agentclientprotocol/claude-agent-acp` (ANTHROPIC_API_KEY)
 - Codex: `@zed-industries/codex-acp` (OPENAI_API_KEY)
 - Gemini CLI: `@google/gemini-cli` (GEMINI_API_KEY)
+- Mistral Vibe: `mistral-vibe` (MISTRAL_API_KEY)
 - Custom: Any ACP-compatible agent
 
 ---

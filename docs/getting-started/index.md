@@ -1,12 +1,20 @@
 # Installation
 
-::: info 🚧 Under Review
-This plugin is awaiting approval for **Obsidian Community Plugins**. For now, use **BRAT** (recommended) or manual installation.
-:::
-
 ## Install the Plugin
 
-### Via BRAT (Recommended)
+### From Community Plugins (Recommended)
+
+1. In Obsidian, open **Settings → Community Plugins → Browse**
+2. Search for **"Agent Client"**
+3. Click **Install**, then **Enable**
+
+<p align="center">
+  <a href="obsidian://show-plugin?id=agent-client" style="display:inline-block;padding:10px 24px;background:#7c3aed;color:white;border-radius:8px;text-decoration:none;font-weight:600;">Add to Obsidian</a>
+</p>
+
+### Via BRAT (Pre-release Versions)
+
+To try pre-release versions before they are published to Community Plugins:
 
 1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) plugin from the Community Plugins browser
 2. In Obsidian settings, go to **Community Plugins → BRAT → Add Beta Plugin**
@@ -28,6 +36,14 @@ This plugin is awaiting approval for **Obsidian Community Plugins**. For now, us
 4. Enable the plugin in **Obsidian Settings → Community Plugins**
 
 ## Prerequisites
+
+### Obsidian Version
+
+Agent Client requires **Obsidian 1.11.4 or later**. The plugin uses Obsidian's Keychain (introduced in 1.11.4) to store agent API keys securely.
+
+::: tip
+Check your version under **Settings → General → Version**. If you are on an older version, update Obsidian from the [official installer](https://obsidian.md/download) or your package manager.
+:::
 
 ### Node.js
 

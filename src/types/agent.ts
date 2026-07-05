@@ -51,41 +51,27 @@ export interface BaseAgentSettings {
 
 	/** Environment variables for the agent process */
 	env: AgentEnvVar[];
+
+	/**
+	 * Whether the agent appears in agent lists and menus (enumeration).
+	 * `undefined` means enabled (backward compatibility with stored data).
+	 * Disabling never blocks resolution: pinned blocks, restored sessions,
+	 * and already-open chats keep working. Check via `isAgentEnabled()`.
+	 */
+	enabled?: boolean;
 }
 
 /**
- * Configuration for Gemini CLI agent.
+ * Per-preset user overrides for a preset agent.
  *
- * Extends base settings with Gemini-specific requirements.
- * The API key (GEMINI_API_KEY) is stored in Obsidian's secret storage
+ * Stored in `settings.presetAgents[presetId]`. The static side of a preset
+ * (default command, API-key env var name, install hints, settings copy) lives
+ * in the registry (`services/preset-agents.ts`); this type holds only what
+ * the user can change. The API key is stored in Obsidian's secret storage
  * and referenced by ID. Empty string means no API key is configured.
  */
-export interface GeminiAgentSettings extends BaseAgentSettings {
-	/** Secret storage ID containing the Gemini API key (GEMINI_API_KEY) */
-	apiKeySecretId: string;
-}
-
-/**
- * Configuration for Claude Code agent.
- *
- * Extends base settings with Claude-specific requirements.
- * The API key (ANTHROPIC_API_KEY) is stored in Obsidian's secret storage
- * and referenced by ID. Empty string means no API key is configured.
- */
-export interface ClaudeAgentSettings extends BaseAgentSettings {
-	/** Secret storage ID containing the Anthropic API key (ANTHROPIC_API_KEY) */
-	apiKeySecretId: string;
-}
-
-/**
- * Configuration for Codex CLI agent.
- *
- * Extends base settings with Codex-specific requirements.
- * The API key (OPENAI_API_KEY) is stored in Obsidian's secret storage
- * and referenced by ID. Empty string means no API key is configured.
- */
-export interface CodexAgentSettings extends BaseAgentSettings {
-	/** Secret storage ID containing the OpenAI API key (OPENAI_API_KEY) */
+export interface PresetAgentUserSettings extends BaseAgentSettings {
+	/** Secret storage ID containing the agent's API key */
 	apiKeySecretId: string;
 }
 

@@ -13,10 +13,14 @@
 </p>
 
 <p align="center">
+  <a href="https://community.obsidian.md/plugins/agent-client" target="_blank"><img src="https://img.shields.io/badge/Add%20to%20Obsidian-7c3aed?logo=obsidian&logoColor=white&style=for-the-badge" alt="Add to Obsidian"></a>
+</p>
+
+<p align="center">
   <a href="https://www.buymeacoffee.com/rait09" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="180" height="50" ></a>
 </p>
 
-Bring AI agents (Claude Code, Codex, Gemini CLI) directly into Obsidian. Chat with your AI assistant right from your vault.
+Bring AI agents (Claude Code, Codex, Gemini CLI, Mistral Vibe) directly into Obsidian. Chat with your AI assistant right from your vault.
 
 Built on [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol) by Zed.
 
@@ -24,10 +28,10 @@ https://github.com/user-attachments/assets/1c538349-b3fb-44dd-a163-7331cbca7824
 
 ## Features
 
-- **Note Mentions**: Reference your notes with `@notename` syntax
+- **Note Mentions**: Reference your notes with `@notename` syntax; the agent also sees resolved paths for `[[wikilinks]]` inside them
 - **Image Attachments**: Paste or drag-and-drop images into the chat
 - **Slash Commands**: Use `/` commands provided by your agent
-- **Multi-Agent Support**: Switch between Claude Code, Codex, Gemini CLI, and custom agents
+- **Multi-Agent Support**: Switch between Claude Code, Codex, Gemini CLI, Mistral Vibe, and custom agents
 - **Multi-Session**: Run multiple agents simultaneously in separate views
 - **Floating Chat**: A persistent, collapsible chat window for quick access
 - **Mode & Model Switching**: Change AI models and agent modes from the chat
@@ -38,7 +42,15 @@ https://github.com/user-attachments/assets/1c538349-b3fb-44dd-a163-7331cbca7824
 
 ## Installation
 
-### Via BRAT (Recommended)
+### From Community Plugins (Recommended)
+
+1. Open **Settings → Community Plugins → Browse**
+2. Search for **"Agent Client"**
+3. Click **Install**, then **Enable**
+
+### Via BRAT (Pre-release Versions)
+
+To try pre-release versions before they are published to Community Plugins:
 
 1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) plugin
 2. Go to **Settings → BRAT → Add Beta Plugin**
@@ -78,7 +90,7 @@ Open a terminal (Terminal on macOS/Linux, PowerShell on Windows) and run the fol
 
 4. **Configure** in **Settings → Agent Client**:
    - **Node.js path**: e.g., `/usr/local/bin/node`
-   - **Built-in agents → Claude Code → Path**: e.g., `/usr/local/bin/claude-agent-acp` (not `claude`)
+   - **Preset agents → Claude Code → Path**: e.g., `/usr/local/bin/claude-agent-acp` (not `claude`)
    - **API key**: Add your key, or leave empty if logged in via CLI
 
 5. **Start chatting**: Click the robot icon in the ribbon
@@ -88,7 +100,8 @@ Open a terminal (Terminal on macOS/Linux, PowerShell on Windows) and run the fol
 - [Claude Code](https://rait-09.github.io/obsidian-agent-client/agent-setup/claude-code.html)
 - [Codex](https://rait-09.github.io/obsidian-agent-client/agent-setup/codex.html)
 - [Gemini CLI](https://rait-09.github.io/obsidian-agent-client/agent-setup/gemini-cli.html)
-- [Custom Agents](https://rait-09.github.io/obsidian-agent-client/agent-setup/custom-agents.html) (OpenCode, Qwen Code, Kiro, Mistral Vibe, etc.)
+- [Mistral Vibe](https://rait-09.github.io/obsidian-agent-client/agent-setup/mistral-vibe.html)
+- [Custom Agents](https://rait-09.github.io/obsidian-agent-client/agent-setup/custom-agents.html) (OpenCode, Qwen Code, Kiro, etc.)
 
 **[Full Documentation](https://rait-09.github.io/obsidian-agent-client/)**
 

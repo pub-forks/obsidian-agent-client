@@ -8,7 +8,6 @@ import type { NoteMetadata } from "../services/vault-service";
 import type {
 	SlashCommand,
 	SessionModeState,
-	SessionModelState,
 	SessionUsage,
 	SessionConfigOption,
 } from "../types/session";
@@ -212,10 +211,6 @@ export interface InputAreaProps {
 	modes?: SessionModeState;
 	/** Callback when mode is changed */
 	onModeChange?: (modeId: string) => void;
-	/** Session model state (available models and current model) - experimental */
-	models?: SessionModelState;
-	/** Callback when model is changed */
-	onModelChange?: (modelId: string) => void;
 	/** Session config options (supersedes modes/models when present) */
 	configOptions?: SessionConfigOption[];
 	/** Callback when a config option is changed */
@@ -243,6 +238,10 @@ export interface InputAreaProps {
 	agentUpdateNotification: AgentUpdateNotification | null;
 	/** Callback to dismiss the agent update notification */
 	onClearAgentUpdate: () => void;
+	/** Gemini CLI deprecation notice (shown while Gemini agent is selected) */
+	geminiNotice: AgentUpdateNotification | null;
+	/** Callback to dismiss the Gemini notice */
+	onClearGeminiNotice: () => void;
 	/** Messages array for input history navigation */
 	messages: ChatMessage[];
 }
@@ -275,8 +274,6 @@ export function InputArea({
 	onRestoredMessageConsumed,
 	modes,
 	onModeChange,
-	models,
-	onModelChange,
 	configOptions,
 	onConfigOptionChange,
 	usage,
@@ -293,6 +290,9 @@ export function InputArea({
 	// Agent update notification props
 	agentUpdateNotification,
 	onClearAgentUpdate,
+	// Gemini CLI deprecation notice props
+	geminiNotice,
+	onClearGeminiNotice,
 	// Input history
 	messages,
 }: InputAreaProps) {
@@ -301,12 +301,10 @@ export function InputArea({
 	const settings = useSettings(plugin);
 	const showEmojis = plugin.settings.displaySettings.showEmojis;
 
-	// Unofficial Obsidian API: app.vault.getConfig() is not in the public type definitions
-	// but is widely used by the plugin community for accessing editor settings.
-	/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access */
-	const obsidianSpellcheck: boolean =
-		(plugin.app.vault as any).getConfig("spellcheck") ?? true;
-	/* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access */
+	// Unofficial Obsidian API (see src/types/obsidian-internals.d.ts)
+	const obsidianSpellcheck =
+		(plugin.app.vault.getConfig("spellcheck") as boolean | undefined) ??
+		true;
 
 	// Local state (hint and command are still local - not needed for broadcast)
 	const [hintText, setHintText] = useState<string | null>(null);
@@ -419,7 +417,7 @@ export function InputArea({
 	const convertFilesToAttachments = useCallback(
 		(files: File[]): AttachedFile[] => {
 			// Get file path via Electron's webUtils API (File.path was removed in Electron 32)
-			// eslint-disable-next-line @typescript-eslint/no-require-imports
+			// eslint-disable-next-line @typescript-eslint/no-require-imports -- electron is a runtime-only module provided by Obsidian's host environment
 			const { webUtils } = require("electron") as {
 				webUtils: { getPathForFile: (file: File) => string };
 			};
@@ -541,7 +539,7 @@ export function InputArea({
 	/**
 	 * Handle drag leave event to reset visual feedback.
 	 */
-	const handleDragLeave = useCallback((e: React.DragEvent) => {
+	const handleDragLeave = useCallback((_e: React.DragEvent) => {
 		dragCounterRef.current--;
 		if (dragCounterRef.current === 0) {
 			setIsDraggingOver(false);
@@ -966,6 +964,17 @@ export function InputArea({
 				/>
 			)}
 
+			{/* Gemini CLI deprecation notice - lowest priority overlay */}
+			{!errorInfo && !agentUpdateNotification && geminiNotice && (
+				<ErrorBanner
+					errorInfo={geminiNotice}
+					onClose={onClearGeminiNotice}
+					showEmojis={showEmojis}
+					view={view}
+					variant={geminiNotice.variant}
+				/>
+			)}
+
 			{/* Mention Dropdown */}
 			{mentions.isOpen && (
 				<SuggestionPopup
@@ -974,8 +983,6 @@ export function InputArea({
 					selectedIndex={mentions.selectedIndex}
 					onSelect={selectMention}
 					onClose={mentions.close}
-					plugin={plugin}
-					view={view}
 				/>
 			)}
 
@@ -987,8 +994,6 @@ export function InputArea({
 					selectedIndex={slashCommands.selectedIndex}
 					onSelect={handleSelectSlashCommand}
 					onClose={slashCommands.close}
-					plugin={plugin}
-					view={view}
 				/>
 			)}
 
@@ -1001,8 +1006,20 @@ export function InputArea({
 				onDrop={(e) => void handleDrop(e)}
 			>
 				{/* Auto-mention Badge */}
-				{autoMentionEnabled && mentions.activeNote && (
-					<div className="agent-client-auto-mention-inline">
+				{mentions.activeNote && (
+					<button
+						className="agent-client-auto-mention-inline"
+						onClick={() =>
+							mentions.toggleAutoMention(
+								!mentions.isAutoMentionDisabled,
+							)
+						}
+						title={
+							mentions.isAutoMentionDisabled
+								? "Enable auto-mention"
+								: "Temporarily disable auto-mention"
+						}
+					>
 						<span
 							className={`agent-client-mention-badge ${mentions.isAutoMentionDisabled ? "agent-client-disabled" : ""}`}
 						>
@@ -1016,22 +1033,8 @@ export function InputArea({
 								</span>
 							)}
 						</span>
-						<button
-							className="agent-client-auto-mention-toggle-btn"
-							onClick={(e) => {
-								const newDisabledState =
-									!mentions.isAutoMentionDisabled;
-								mentions.toggleAutoMention(newDisabledState);
-								const iconName = newDisabledState
-									? "x"
-									: "plus";
-								setIcon(e.currentTarget, iconName);
-							}}
-							title={
-								mentions.isAutoMentionDisabled
-									? "Enable auto-mention"
-									: "Temporarily disable auto-mention"
-							}
+						<span
+							className="agent-client-auto-mention-toggle-icon"
 							ref={(el) => {
 								if (el) {
 									const iconName =
@@ -1042,7 +1045,7 @@ export function InputArea({
 								}
 							}}
 						/>
-					</div>
+					</button>
 				)}
 
 				{/* Textarea with Hint Overlay */}
@@ -1054,7 +1057,7 @@ export function InputArea({
 						onKeyDown={handleKeyDown}
 						onPaste={(e) => void handlePaste(e)}
 						placeholder={placeholder}
-						className={`agent-client-chat-input-textarea ${autoMentionEnabled && mentions.activeNote ? "has-auto-mention" : ""}`}
+						className={`agent-client-chat-input-textarea ${mentions.activeNote ? "has-auto-mention" : ""}`}
 						rows={1}
 						spellCheck={obsidianSpellcheck}
 					/>
@@ -1086,8 +1089,6 @@ export function InputArea({
 					onSendOrStop={() => void handleSendOrStop()}
 					modes={modes}
 					onModeChange={onModeChange}
-					models={models}
-					onModelChange={onModelChange}
 					configOptions={configOptions}
 					onConfigOptionChange={onConfigOptionChange}
 					usage={usage}

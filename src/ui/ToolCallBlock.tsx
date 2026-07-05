@@ -32,7 +32,6 @@ export const ToolCallBlock = React.memo(function ToolCallBlock({
 		kind,
 		title,
 		status,
-		toolCallId,
 		permissionRequest,
 		locations,
 		rawInput,
@@ -146,7 +145,6 @@ export const ToolCallBlock = React.memo(function ToolCallBlock({
 								key={index}
 								terminalId={item.terminalId}
 								terminalClient={terminalClient || null}
-								plugin={plugin}
 							/>
 						);
 					}
@@ -190,8 +188,7 @@ export const ToolCallBlock = React.memo(function ToolCallBlock({
 						...permissionRequest,
 						selectedOptionId: selectedOptionId,
 					}}
-					toolCallId={toolCallId}
-					plugin={plugin}
+					showEmojis={showEmojis}
 					onApprovePermission={onApprovePermission}
 					onOptionSelected={setSelectedOptionId}
 				/>

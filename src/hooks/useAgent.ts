@@ -14,6 +14,7 @@ import type { IVaultAccess } from "../services/vault-service";
 import type { ISettingsAccess } from "../services/settings-service";
 import type { ErrorInfo } from "../types/errors";
 import type { IMentionService } from "../utils/mention-parser";
+import type { IWikilinkResolver } from "../utils/wikilink-resolver";
 import { useAgentSession } from "./useAgentSession";
 import { useAgentMessages, type SendMessageOptions } from "./useAgentMessages";
 
@@ -29,7 +30,6 @@ import type { ChatMessage, ActivePermission } from "../types/chat";
 import type {
 	ChatSession,
 	SessionModeState,
-	SessionModelState,
 	SessionConfigOption,
 } from "../types/session";
 import type { AgentDisplayInfo } from "../services/session-helpers";
@@ -66,13 +66,11 @@ export interface UseAgentReturn {
 	updateSessionFromLoad: (
 		sessionId: string,
 		modes?: SessionModeState,
-		models?: SessionModelState,
 		configOptions?: SessionConfigOption[],
 	) => Promise<void>;
 
 	// Config
 	setMode: (modeId: string) => Promise<void>;
-	setModel: (modelId: string) => Promise<void>;
 	setConfigOption: (configId: string, value: string) => Promise<void>;
 
 	// Message operations
@@ -113,7 +111,7 @@ export interface UseAgentReturn {
 export function useAgent(
 	agentClient: AcpClient,
 	settingsAccess: ISettingsAccess,
-	vaultAccess: IVaultAccess & IMentionService,
+	vaultAccess: IVaultAccess & IMentionService & IWikilinkResolver,
 	workingDirectory: string,
 	initialAgentId?: string,
 ): UseAgentReturn {
@@ -199,7 +197,6 @@ export function useAgent(
 
 			// Config
 			setMode: agentSession.setMode,
-			setModel: agentSession.setModel,
 			setConfigOption: agentSession.setConfigOption,
 
 			// Message operations
@@ -232,7 +229,6 @@ export function useAgent(
 			agentSession.getAvailableAgents,
 			agentSession.updateSessionFromLoad,
 			agentSession.setMode,
-			agentSession.setModel,
 			agentSession.setConfigOption,
 			agentMessages.sendMessage,
 			agentMessages.clearMessages,

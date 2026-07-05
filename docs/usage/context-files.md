@@ -19,6 +19,7 @@ Each agent uses its own context file:
 | Claude Code | `CLAUDE.md` |
 | Codex | `AGENTS.md` |
 | Gemini CLI | `GEMINI.md` |
+| Mistral Vibe | `AGENTS.md` |
 
 Place the context file in your **vault root** to have the agent read it automatically.
 

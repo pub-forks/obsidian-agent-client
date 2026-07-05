@@ -122,44 +122,6 @@ export interface SessionModeState {
 	currentModeId: string;
 }
 
-// ============================================================================
-// Model (Experimental)
-// ============================================================================
-
-/**
- * Represents an AI model available in a session.
- *
- * Models determine which AI model is used for responses.
- * This is an experimental feature and may change.
- */
-/** DEPRECATED: Use SessionConfigOption instead. Kept for backward compatibility. */
-export interface SessionModel {
-	/** Unique identifier for this model (e.g., "claude-sonnet-4") */
-	modelId: string;
-
-	/** Human-readable name for display */
-	name: string;
-
-	/** Optional description of this model */
-	description?: string;
-}
-
-/**
- * State of available models in a session.
- *
- * Contains both the list of available models and the currently active model.
- * Updated via NewSessionResponse initially.
- * Note: Unlike modes, there is no dedicated notification for model changes.
- */
-/** DEPRECATED: Use SessionConfigOption instead. Kept for backward compatibility. */
-export interface SessionModelState {
-	/** List of models available in this session */
-	availableModels: SessionModel[];
-
-	/** ID of the currently active model */
-	currentModelId: string;
-}
-
 /**
  * Context window usage and cost information for a session.
  * Reported by the agent via `usage_update` session notifications.
@@ -197,7 +159,7 @@ export interface ChatSession {
 	/** Current state of the session */
 	state: SessionState;
 
-	/** ID of the active agent (claude, gemini, or custom agent ID) */
+	/** ID of the active agent (a preset agent ID such as "claude-code-acp", or a custom agent ID) */
 	agentId: string;
 
 	/** Display name of the agent at session creation time */
@@ -217,12 +179,6 @@ export interface ChatSession {
 	 * with agents that don't support configOptions.
 	 */
 	modes?: SessionModeState;
-
-	/**
-	 * DEPRECATED: Use configOptions instead. Kept for backward compatibility
-	 * with agents that don't support configOptions.
-	 */
-	models?: SessionModelState;
 
 	/**
 	 * Session configuration options (mode, model, thought_level, etc.).
@@ -454,19 +410,30 @@ export interface ProcessErrorUpdate extends SessionUpdateBase {
 // Config Option Types
 // ============================================================================
 
-/**
- * A session configuration option (e.g. mode, model, thought_level).
- * Part of the ACP configOptions API that supersedes legacy modes/models.
- */
-export interface SessionConfigOption {
+interface SessionConfigOptionBase {
 	id: string;
 	name: string;
 	description?: string | null;
 	category?: string | null;
-	type: "select";
-	currentValue: string;
-	options: SessionConfigSelectOption[] | SessionConfigSelectGroup[];
 }
+
+/**
+ * A session configuration option (e.g. mode, model, thought_level).
+ * Part of the ACP configOptions API that supersedes legacy modes/models.
+ *
+ * `select` carries a string value + choices. `boolean` (ACP 0.28+) is held as
+ * data for future support — it is not yet rendered or settable in the UI.
+ */
+export type SessionConfigOption =
+	| (SessionConfigOptionBase & {
+			type: "select";
+			currentValue: string;
+			options: SessionConfigSelectOption[] | SessionConfigSelectGroup[];
+	  })
+	| (SessionConfigOptionBase & {
+			type: "boolean";
+			currentValue: boolean;
+	  });
 
 export interface SessionConfigSelectOption {
 	value: string;
@@ -571,9 +538,6 @@ export interface SessionResult {
 	/** DEPRECATED: Use configOptions instead. Kept for backward compatibility. */
 	modes?: SessionModeState;
 
-	/** DEPRECATED: Use configOptions instead. Kept for backward compatibility. */
-	models?: SessionModelState;
-
 	/** Session config options (supersedes modes/models) */
 	configOptions?: SessionConfigOption[];
 }
@@ -593,6 +557,14 @@ export interface SavedSessionInfo {
 	cwd: string;
 	/** Human-readable session title (first 50 chars of first user message) */
 	title?: string;
+	/**
+	 * Device-neutral id of the embedded block this session belongs to. Used to
+	 * RESTORE the block's latest conversation: getSavedSessionByEmbedId returns
+	 * the newest embedId match. Sessions are NOT deduped or deleted by embedId —
+	 * a block's conversations accumulate in Session History like any other
+	 * session and stay recoverable. Device-local; never written into note content.
+	 */
+	embedId?: string;
 	/** ISO 8601 timestamp of session creation */
 	createdAt: string;
 	/** ISO 8601 timestamp of last activity */

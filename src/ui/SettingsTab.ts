@@ -1,17 +1,30 @@
 import {
 	App,
+	Notice,
 	PluginSettingTab,
 	Setting,
 	DropdownComponent,
 	Platform,
 	SecretComponent,
+	ToggleComponent,
+	ExtraButtonComponent,
+	setIcon,
 } from "obsidian";
 import type AgentClientPlugin from "../plugin";
 import type {
 	CustomAgentSettings,
+	PresetAgentUserSettings,
 	AgentEnvVar,
 	ChatViewLocation,
 } from "../plugin";
+import {
+	PRESET_AGENTS,
+	type PresetAgentDefinition,
+} from "../services/preset-agents";
+import {
+	getAvailableAgentsFromSettings,
+	isAgentEnabled,
+} from "../services/session-helpers";
 import { resolveCommandPath, resolveCommandPathInWsl } from "../utils/paths";
 import {
 	normalizeEnvVars,
@@ -24,10 +37,28 @@ export class AgentClientSettingTab extends PluginSettingTab {
 	plugin: AgentClientPlugin;
 	private agentSelector: DropdownComponent | null = null;
 	private unsubscribe: (() => void) | null = null;
+	/**
+	 * Open agent sections ("preset:<id>" / "custom:<id>"). Deliberately
+	 * non-persisted (cleared on hide), but held on the instance so
+	 * refreshDisplay() calls from in-section actions (Auto-detect, the WSL
+	 * toggle) re-render sections in their current open state instead of
+	 * collapsing everything.
+	 */
+	private openSections = new Set<string>();
 
 	constructor(app: App, plugin: AgentClientPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	/**
+	 * Re-renders the settings tab. Wraps the deprecated display() call so the
+	 * suppression lives in one place until Obsidian 1.13 leaves Catalyst beta
+	 * and the tab can migrate to getSettingDefinitions().
+	 */
+	private refreshDisplay(): void {
+		// eslint-disable-next-line @typescript-eslint/no-deprecated -- migrate to getSettingDefinitions once Obsidian 1.13 leaves Catalyst beta
+		this.display();
 	}
 
 	display(): void {
@@ -77,13 +108,15 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				text.setPlaceholder("Leave blank (login shell auto-resolves)")
 					.setValue(this.plugin.settings.nodePath)
 					.onChange(async (value) => {
-						this.plugin.settings.nodePath = value.trim();
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							nodePath: value.trim(),
+						});
 					});
 			});
 		this.addAutoDetectButton(nodePathSetting, "node", async (path) => {
-			this.plugin.settings.nodePath = path;
-			await this.plugin.saveSettings();
+			await this.plugin.settingsService.updateSettings({
+				nodePath: path,
+			});
 		});
 
 		new Setting(containerEl)
@@ -103,10 +136,9 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					)
 					.setValue(this.plugin.settings.sendMessageShortcut)
 					.onChange(async (value) => {
-						this.plugin.settings.sendMessageShortcut = value as
-							| "enter"
-							| "cmd-enter";
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							sendMessageShortcut: value as "enter" | "cmd-enter",
+						});
 					}),
 			);
 
@@ -125,8 +157,24 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.autoMentionActiveNote)
 					.onChange(async (value) => {
-						this.plugin.settings.autoMentionActiveNote = value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							autoMentionActiveNote: value,
+						});
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Expand wikilink context")
+			.setDesc(
+				"Surface [[wikilinks]] found inside mentioned/auto-mentioned notes as resolved file paths so the agent can choose which to read. Does not embed linked content. (Distinct from Prompt injection → Wikilink formatting, which asks the agent to write [[links]] in its replies.)",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.expandWikilinkContext)
+					.onChange(async (value) => {
+						await this.plugin.settingsService.updateSettings({
+							expandWikilinkContext: value,
+						});
 					}),
 			);
 
@@ -146,9 +194,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						const num = parseInt(value, 10);
 						if (!isNaN(num) && num >= 1) {
-							this.plugin.settings.displaySettings.maxNoteLength =
-								num;
-							await this.plugin.saveSettings();
+							await this.plugin.settingsService.updateSettings({
+								displaySettings: {
+									...this.plugin.settings.displaySettings,
+									maxNoteLength: num,
+								},
+							});
 						}
 					}),
 			);
@@ -170,9 +221,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						const num = parseInt(value, 10);
 						if (!isNaN(num) && num >= 1) {
-							this.plugin.settings.displaySettings.maxSelectionLength =
-								num;
-							await this.plugin.saveSettings();
+							await this.plugin.settingsService.updateSettings({
+								displaySettings: {
+									...this.plugin.settings.displaySettings,
+									maxSelectionLength: num,
+								},
+							});
 						}
 					}),
 			);
@@ -194,9 +248,9 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.addOption("editor-split", "Editor area (split)")
 					.setValue(this.plugin.settings.chatViewLocation)
 					.onChange(async (value) => {
-						this.plugin.settings.chatViewLocation =
-							value as ChatViewLocation;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							chatViewLocation: value as ChatViewLocation,
+						});
 					}),
 			);
 
@@ -306,8 +360,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.displaySettings.showEmojis)
 					.onChange(async (value) => {
-						this.plugin.settings.displaySettings.showEmojis = value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							displaySettings: {
+								...this.plugin.settings.displaySettings,
+								showEmojis: value,
+							},
+						});
 					}),
 			);
 
@@ -322,10 +380,13 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						this.plugin.settings.displaySettings.autoCollapseDiffs,
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.displaySettings.autoCollapseDiffs =
-							value;
-						await this.plugin.saveSettings();
-						this.display();
+						await this.plugin.settingsService.updateSettings({
+							displaySettings: {
+								...this.plugin.settings.displaySettings,
+								autoCollapseDiffs: value,
+							},
+						});
+						this.refreshDisplay();
 					}),
 			);
 
@@ -347,9 +408,15 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						.onChange(async (value) => {
 							const num = parseInt(value, 10);
 							if (!isNaN(num) && num > 0) {
-								this.plugin.settings.displaySettings.diffCollapseThreshold =
-									num;
-								await this.plugin.saveSettings();
+								await this.plugin.settingsService.updateSettings(
+									{
+										displaySettings: {
+											...this.plugin.settings
+												.displaySettings,
+											diffCollapseThreshold: num,
+										},
+									},
+								);
 							}
 						}),
 				);
@@ -401,8 +468,9 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.setPlaceholder("https://example.com/avatar.png")
 					.setValue(this.plugin.settings.floatingButtonImage)
 					.onChange(async (value) => {
-						this.plugin.settings.floatingButtonImage = value.trim();
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							floatingButtonImage: value.trim(),
+						});
 					}),
 			);
 
@@ -421,8 +489,9 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.autoAllowPermissions)
 					.onChange(async (value) => {
-						this.plugin.settings.autoAllowPermissions = value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							autoAllowPermissions: value,
+						});
 						// Propagate to all live AcpClient instances
 						this.plugin.updateAllAutoAllow(value);
 					}),
@@ -443,8 +512,9 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.enableSystemNotifications)
 					.onChange(async (value) => {
-						this.plugin.settings.enableSystemNotifications = value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							enableSystemNotifications: value,
+						});
 					}),
 			);
 
@@ -465,7 +535,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.promptInjection.enabled = value;
 						await this.plugin.saveSettings();
-						this.display();
+						this.refreshDisplay();
 					}),
 			);
 
@@ -473,7 +543,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 			new Setting(containerEl)
 				.setName("Wikilink formatting")
 				.setDesc(
-					"Instruct agents to use [[Note Name]] wikilink syntax when referencing notes.",
+					"Instruct agents to use [[Note Name]] wikilink syntax when referencing notes in their replies. (Distinct from Mentions → Expand wikilink context, which resolves [[links]] inside your notes to file paths.)",
 				)
 				.addToggle((toggle) =>
 					toggle
@@ -534,9 +604,10 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					toggle
 						.setValue(this.plugin.settings.windowsWslMode)
 						.onChange(async (value) => {
-							this.plugin.settings.windowsWslMode = value;
-							await this.plugin.saveSettings();
-							this.display(); // Refresh to show/hide distribution setting
+							await this.plugin.settingsService.updateSettings({
+								windowsWslMode: value,
+							});
+							this.refreshDisplay(); // Refresh to show/hide distribution setting
 						}),
 				);
 
@@ -554,9 +625,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 									"",
 							)
 							.onChange(async (value) => {
-								this.plugin.settings.windowsWslDistribution =
-									value.trim() || undefined;
-								await this.plugin.saveSettings();
+								await this.plugin.settingsService.updateSettings(
+									{
+										windowsWslDistribution:
+											value.trim() || undefined,
+									},
+								);
 							}),
 					);
 			}
@@ -566,11 +640,11 @@ export class AgentClientSettingTab extends PluginSettingTab {
 		// Agents
 		// ─────────────────────────────────────────────────────────────────────
 
-		new Setting(containerEl).setName("Built-in agents").setHeading();
+		new Setting(containerEl).setName("Preset agents").setHeading();
 
-		this.renderClaudeSettings(containerEl);
-		this.renderCodexSettings(containerEl);
-		this.renderGeminiSettings(containerEl);
+		for (const def of PRESET_AGENTS) {
+			this.renderPresetSettings(containerEl, def);
+		}
 
 		new Setting(containerEl).setName("Custom agents").setHeading();
 
@@ -590,9 +664,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.setPlaceholder("Agent Client")
 					.setValue(this.plugin.settings.exportSettings.defaultFolder)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.defaultFolder =
-							value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								defaultFolder: value,
+							},
+						});
 					}),
 			);
 
@@ -608,9 +685,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						this.plugin.settings.exportSettings.filenameTemplate,
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.filenameTemplate =
-							value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								filenameTemplate: value,
+							},
+						});
 					}),
 			);
 
@@ -626,9 +706,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						this.plugin.settings.exportSettings.frontmatterTag,
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.frontmatterTag =
-							value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								frontmatterTag: value,
+							},
+						});
 					}),
 			);
 
@@ -639,10 +722,13 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.exportSettings.includeImages)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.includeImages =
-							value;
-						await this.plugin.saveSettings();
-						this.display();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								includeImages: value,
+							},
+						});
+						this.refreshDisplay();
 					}),
 			);
 
@@ -665,10 +751,16 @@ export class AgentClientSettingTab extends PluginSettingTab {
 							this.plugin.settings.exportSettings.imageLocation,
 						)
 						.onChange(async (value) => {
-							this.plugin.settings.exportSettings.imageLocation =
-								value as "obsidian" | "custom" | "base64";
-							await this.plugin.saveSettings();
-							this.display();
+							await this.plugin.settingsService.updateSettings({
+								exportSettings: {
+									...this.plugin.settings.exportSettings,
+									imageLocation: value as
+										| "obsidian"
+										| "custom"
+										| "base64",
+								},
+							});
+							this.refreshDisplay();
 						}),
 				);
 
@@ -688,9 +780,15 @@ export class AgentClientSettingTab extends PluginSettingTab {
 									.imageCustomFolder,
 							)
 							.onChange(async (value) => {
-								this.plugin.settings.exportSettings.imageCustomFolder =
-									value;
-								await this.plugin.saveSettings();
+								await this.plugin.settingsService.updateSettings(
+									{
+										exportSettings: {
+											...this.plugin.settings
+												.exportSettings,
+											imageCustomFolder: value,
+										},
+									},
+								);
 							}),
 					);
 			}
@@ -707,9 +805,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						this.plugin.settings.exportSettings.autoExportOnNewChat,
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.autoExportOnNewChat =
-							value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								autoExportOnNewChat: value,
+							},
+						});
 					}),
 			);
 
@@ -725,9 +826,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 							.autoExportOnCloseChat,
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.autoExportOnCloseChat =
-							value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								autoExportOnCloseChat: value,
+							},
+						});
 					}),
 			);
 
@@ -740,9 +844,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						this.plugin.settings.exportSettings.openFileAfterExport,
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.exportSettings.openFileAfterExport =
-							value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							exportSettings: {
+								...this.plugin.settings.exportSettings,
+								openFileAfterExport: value,
+							},
+						});
 					}),
 			);
 
@@ -761,8 +868,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.debugMode)
 					.onChange(async (value) => {
-						await this.plugin.saveSettingsAndNotify({
-							...this.plugin.settings,
+						await this.plugin.settingsService.updateSettings({
 							debugMode: value,
 						});
 					}),
@@ -797,6 +903,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 			this.unsubscribe();
 			this.unsubscribe = null;
 		}
+		this.openSections.clear();
 	}
 
 	private renderAgentSelector(containerEl: HTMLElement) {
@@ -836,36 +943,14 @@ export class AgentClientSettingTab extends PluginSettingTab {
 	}
 
 	private getAgentOptions(): { id: string; label: string }[] {
-		const toOption = (id: string, displayName: string) => ({
+		// Default-agent candidates come from the enabled enumeration —
+		// disabled agents can't be picked as the default.
+		const options = getAvailableAgentsFromSettings(
+			this.plugin.settings,
+		).map(({ id, displayName }) => ({
 			id,
 			label: `${displayName} (${id})`,
-		});
-		const options: { id: string; label: string }[] = [
-			toOption(
-				this.plugin.settings.claude.id,
-				this.plugin.settings.claude.displayName ||
-					this.plugin.settings.claude.id,
-			),
-			toOption(
-				this.plugin.settings.codex.id,
-				this.plugin.settings.codex.displayName ||
-					this.plugin.settings.codex.id,
-			),
-			toOption(
-				this.plugin.settings.gemini.id,
-				this.plugin.settings.gemini.displayName ||
-					this.plugin.settings.gemini.id,
-			),
-		];
-		for (const agent of this.plugin.settings.customAgents) {
-			if (agent.id && agent.id.length > 0) {
-				const labelSource =
-					agent.displayName && agent.displayName.length > 0
-						? agent.displayName
-						: agent.id;
-				options.push(toOption(agent.id, labelSource));
-			}
-		}
+		}));
 		const seen = new Set<string>();
 		return options.filter(({ id }) => {
 			if (seen.has(id)) {
@@ -876,224 +961,281 @@ export class AgentClientSettingTab extends PluginSettingTab {
 		});
 	}
 
-	private renderGeminiSettings(sectionEl: HTMLElement) {
-		const gemini = this.plugin.settings.gemini;
+	/** True when `agentId` is the only agent still enabled. */
+	private isLastEnabledAgent(agentId: string): boolean {
+		const enabled = getAvailableAgentsFromSettings(this.plugin.settings);
+		return enabled.length === 1 && enabled[0].id === agentId;
+	}
 
-		new Setting(sectionEl)
-			.setName(gemini.displayName || "Gemini CLI")
-			.setHeading();
+	/**
+	 * Move a custom section's open state when its agent id changes. Without
+	 * this, a section renamed while open stays keyed under the old id and
+	 * the next refreshDisplay() collapses it mid-edit.
+	 */
+	private rekeyOpenSection(oldId: string, newId: string): void {
+		if (oldId === newId) {
+			return;
+		}
+		if (this.openSections.delete(`custom:${oldId}`)) {
+			this.openSections.add(`custom:${newId}`);
+		}
+	}
 
-		new Setting(sectionEl)
-			.setName("API key")
-			.setDesc(
-				"Gemini API key. Required if not logging in with a Google account. Select from Obsidian's Keychain or create a new secret.",
-			)
-			.addComponent((el) =>
-				new SecretComponent(this.app, el)
-					.setValue(gemini.apiKeySecretId)
-					.onChange(async (value) => {
-						this.plugin.settings.gemini.apiKeySecretId = value;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		const geminiPathSetting = new Setting(sectionEl)
-			.setName("Path")
-			.setDesc(
-				'Command name or path to the Gemini CLI. Use just "gemini" to let the login shell resolve it, or enter an absolute path for a specific version.',
-			)
-			.addText((text) => {
-				text.setPlaceholder("gemini")
-					.setValue(gemini.command)
-					.onChange(async (value) => {
-						this.plugin.settings.gemini.command = value.trim();
-						await this.plugin.saveSettings();
-					});
+	/**
+	 * "Enabled" toggle rendered into an agent section's summary row.
+	 * Refuses to disable the last enabled agent (Notice + revert). After the
+	 * write, re-validates the default agent and refreshes the default-agent
+	 * dropdown in place — no refreshDisplay(), so open sections, scroll,
+	 * and focus are kept.
+	 */
+	private addEnabledToggleControl(
+		parentEl: HTMLElement,
+		// Resolved at interaction time: a custom agent's id can be renamed
+		// after this row rendered (the id editor commits per keystroke).
+		getAgentId: () => string | undefined,
+		currentValue: boolean,
+		writer: { write: (value: boolean) => Promise<void> | void },
+	): void {
+		const toggle = new ToggleComponent(parentEl);
+		toggle
+			.setValue(currentValue)
+			.setTooltip("Show this agent in agent lists, menus, and commands")
+			.onChange(async (value) => {
+				const agentId = getAgentId();
+				if (agentId === undefined) {
+					return;
+				}
+				if (!value && this.isLastEnabledAgent(agentId)) {
+					toggle.setValue(true);
+					new Notice(
+						"[Agent Client] At least one agent must stay enabled.",
+					);
+					return;
+				}
+				await writer.write(value);
+				this.plugin.ensureAtLeastOneEnabled();
+				this.plugin.ensureDefaultAgentId();
+				await this.flushSettings();
+				this.refreshAgentDropdown();
 			});
-		this.addAutoDetectButton(geminiPathSetting, "gemini", async (path) => {
-			this.plugin.settings.gemini.command = path;
-			await this.plugin.saveSettings();
+		toggle.toggleEl.setAttribute("aria-label", "Enabled");
+	}
+
+	/**
+	 * Collapsible section shell shared by preset and custom agent sections.
+	 * The summary row is a real <button> (keyboard/focus for free, with
+	 * aria-expanded) holding the chevron + agent name; the Enabled toggle
+	 * sits in the row as a flex sibling — not nested, since interactive
+	 * content inside a button is invalid and as a sibling its clicks can't
+	 * reach the collapse handler. Open/close flips classes in place, no
+	 * re-render. Interim UI until the SettingsTab migrates to the
+	 * declarative settings API (Obsidian 1.13, see plan/TODO.md).
+	 *
+	 * `renderBody` receives the (initially hidden when closed) body element
+	 * plus the summary name element, so body controls that edit the display
+	 * name can sync the summary label in place.
+	 */
+	private renderCollapsibleAgentSection(
+		containerEl: HTMLElement,
+		sectionId: string,
+		name: string,
+		enabledToggle: {
+			getAgentId: () => string | undefined;
+			currentValue: boolean;
+			write: (value: boolean) => Promise<void> | void;
+		},
+		renderBody: (bodyEl: HTMLElement, nameEl: HTMLElement) => void,
+		// Optional controls rendered after the Enabled toggle (e.g. the
+		// custom agent delete button). Siblings of the collapse button, so
+		// their clicks can't toggle the section.
+		renderSummaryTrailing?: (summaryEl: HTMLElement) => void,
+	): void {
+		const isOpen = this.openSections.has(sectionId);
+
+		const summaryEl = containerEl.createDiv({
+			cls: "agent-client-agent-summary",
 		});
-		this.addInstallHint(sectionEl, "@google/gemini-cli");
+		summaryEl.toggleClass("agent-client-open", isOpen);
+		const buttonEl = summaryEl.createEl("button", {
+			cls: "agent-client-agent-summary-button",
+			attr: { type: "button", "aria-expanded": String(isOpen) },
+		});
+		const nameEl = buttonEl.createSpan({
+			cls: "agent-client-agent-summary-name",
+			text: name,
+		});
+		const chevronEl = buttonEl.createSpan({
+			cls: "agent-client-agent-summary-chevron",
+		});
+		setIcon(chevronEl, "chevron-right");
+		this.addEnabledToggleControl(
+			summaryEl,
+			enabledToggle.getAgentId,
+			enabledToggle.currentValue,
+			{ write: enabledToggle.write },
+		);
+		renderSummaryTrailing?.(summaryEl);
 
-		new Setting(sectionEl)
-			.setName("Arguments")
-			.setDesc(
-				'Enter one argument per line. Leave empty to run without arguments.(Currently, the Gemini CLI requires the "--experimental-acp" option.)',
-			)
-			.addTextArea((text) => {
-				text.setPlaceholder("")
-					.setValue(this.formatArgs(gemini.args))
-					.onChange(async (value) => {
-						this.plugin.settings.gemini.args =
-							this.parseArgs(value);
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.rows = 3;
-			});
+		const bodyEl = containerEl.createDiv({
+			cls: "agent-client-agent-section-body",
+		});
+		bodyEl.toggleClass("agent-client-collapsed", !isOpen);
 
-		new Setting(sectionEl)
-			.setName("Environment variables")
-			.setDesc(
-				"Enter KEY=VALUE pairs, one per line. Required to authenticate with Vertex AI. GEMINI_API_KEY is derived from the field above.",
-			)
-			.addTextArea((text) => {
-				text.setPlaceholder("GOOGLE_CLOUD_PROJECT=...")
-					.setValue(this.formatEnv(gemini.env))
-					.onChange(async (value) => {
-						this.plugin.settings.gemini.env = this.parseEnv(value);
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.rows = 3;
-			});
+		buttonEl.addEventListener("click", () => {
+			const open = !this.openSections.has(sectionId);
+			if (open) {
+				this.openSections.add(sectionId);
+			} else {
+				this.openSections.delete(sectionId);
+			}
+			buttonEl.setAttribute("aria-expanded", String(open));
+			summaryEl.toggleClass("agent-client-open", open);
+			bodyEl.toggleClass("agent-client-collapsed", !open);
+		});
+
+		renderBody(bodyEl, nameEl);
 	}
 
-	private renderClaudeSettings(sectionEl: HTMLElement) {
-		const claude = this.plugin.settings.claude;
+	/**
+	 * Write a partial update for one preset agent through the settings
+	 * service. Emits a fresh presetAgents record + fresh entry so slice
+	 * subscribers (ChatPanel via useSettingsSelector) detect the change by
+	 * reference compare.
+	 */
+	private async updatePresetAgent(
+		presetId: string,
+		updates: Partial<PresetAgentUserSettings>,
+	): Promise<void> {
+		const current = this.plugin.settings.presetAgents[presetId];
+		if (!current) {
+			return;
+		}
+		await this.plugin.settingsService.updateSettings({
+			presetAgents: {
+				...this.plugin.settings.presetAgents,
+				[presetId]: { ...current, ...updates },
+			},
+		});
+	}
 
-		new Setting(sectionEl)
-			.setName(claude.displayName || "Claude Code (ACP)")
-			.setHeading();
+	/**
+	 * Render the collapsible settings section for one preset agent, driven
+	 * entirely by its registry definition (summary row with Enabled toggle,
+	 * API key row, path + auto-detect, install hint, arguments, environment
+	 * variables).
+	 */
+	private renderPresetSettings(
+		containerEl: HTMLElement,
+		def: PresetAgentDefinition,
+	) {
+		const preset = this.plugin.settings.presetAgents[def.presetId];
+		if (!preset) {
+			// Normalization guarantees an entry per registry preset.
+			return;
+		}
 
-		new Setting(sectionEl)
-			.setName("API key")
-			.setDesc(
-				"Anthropic API key. Required if not logging in with an Anthropic account. Select from Obsidian's Keychain or create a new secret.",
-			)
-			.addComponent((el) =>
-				new SecretComponent(this.app, el)
-					.setValue(claude.apiKeySecretId)
-					.onChange(async (value) => {
-						this.plugin.settings.claude.apiKeySecretId = value;
-						await this.plugin.saveSettings();
-					}),
-			);
+		this.renderCollapsibleAgentSection(
+			containerEl,
+			`preset:${def.presetId}`,
+			preset.displayName || def.defaultDisplayName,
+			{
+				getAgentId: () => def.presetId,
+				currentValue: isAgentEnabled(preset),
+				write: (value) =>
+					this.updatePresetAgent(def.presetId, { enabled: value }),
+			},
+			(bodyEl) => this.renderPresetSettingsBody(bodyEl, def, preset),
+		);
+	}
 
-		const claudePathSetting = new Setting(sectionEl)
+	private renderPresetSettingsBody(
+		bodyEl: HTMLElement,
+		def: PresetAgentDefinition,
+		preset: PresetAgentUserSettings,
+	) {
+		if (def.apiKey) {
+			new Setting(bodyEl)
+				.setName("API key")
+				.setDesc(def.apiKey.settingDesc)
+				.addComponent((el) =>
+					new SecretComponent(this.app, el)
+						.setValue(preset.apiKeySecretId)
+						.onChange(async (value) => {
+							await this.updatePresetAgent(def.presetId, {
+								apiKeySecretId: value,
+							});
+						}),
+				);
+		}
+
+		const pathSetting = new Setting(bodyEl)
 			.setName("Path")
-			.setDesc(
-				'Command name or path to claude-agent-acp. Use just "claude-agent-acp" to let the login shell resolve it, or enter an absolute path.',
-			)
+			.setDesc(def.settingsCopy.pathDesc)
 			.addText((text) => {
-				text.setPlaceholder("claude-agent-acp")
-					.setValue(claude.command)
+				text.setPlaceholder(def.defaultCommand)
+					.setValue(preset.command)
 					.onChange(async (value) => {
-						this.plugin.settings.claude.command = value.trim();
-						await this.plugin.saveSettings();
+						await this.updatePresetAgent(def.presetId, {
+							command: value.trim(),
+						});
 					});
 			});
 		this.addAutoDetectButton(
-			claudePathSetting,
-			"claude-agent-acp",
+			pathSetting,
+			def.defaultCommand,
 			async (path) => {
-				this.plugin.settings.claude.command = path;
-				await this.plugin.saveSettings();
+				await this.updatePresetAgent(def.presetId, { command: path });
 			},
 		);
-		this.addInstallHint(sectionEl, "@agentclientprotocol/claude-agent-acp");
+		// Native Windows may need a different install command than the
+		// POSIX-shell one (WSL mode runs commands in bash, so it keeps the
+		// default). The WSL toggle re-renders the tab, keeping this in sync.
+		const isNativeWindows =
+			Platform.isWin && !this.plugin.settings.windowsWslMode;
+		this.addInstallHint(
+			bodyEl,
+			isNativeWindows && def.installHint.nativeWindows
+				? def.installHint.nativeWindows
+				: def.installHint.default,
+		);
 
-		new Setting(sectionEl)
+		new Setting(bodyEl)
 			.setName("Arguments")
 			.setDesc(
-				"Enter one argument per line. Leave empty to run without arguments.",
+				"Enter one argument per line. Leave empty to run without arguments." +
+					(def.settingsCopy.argsDescSuffix ?? ""),
 			)
 			.addTextArea((text) => {
 				text.setPlaceholder("")
-					.setValue(this.formatArgs(claude.args))
+					.setValue(this.formatArgs(preset.args))
 					.onChange(async (value) => {
-						this.plugin.settings.claude.args =
-							this.parseArgs(value);
-						await this.plugin.saveSettings();
+						await this.updatePresetAgent(def.presetId, {
+							args: this.parseArgs(value),
+						});
 					});
 				text.inputEl.rows = 3;
 			});
 
-		new Setting(sectionEl)
-			.setName("Environment variables")
-			.setDesc(
-				"Enter KEY=VALUE pairs, one per line. ANTHROPIC_API_KEY is derived from the field above.",
-			)
-			.addTextArea((text) => {
-				text.setPlaceholder("")
-					.setValue(this.formatEnv(claude.env))
-					.onChange(async (value) => {
-						this.plugin.settings.claude.env = this.parseEnv(value);
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.rows = 3;
-			});
-	}
-
-	private renderCodexSettings(sectionEl: HTMLElement) {
-		const codex = this.plugin.settings.codex;
-
-		new Setting(sectionEl)
-			.setName(codex.displayName || "Codex")
-			.setHeading();
-
-		new Setting(sectionEl)
-			.setName("API key")
-			.setDesc(
-				"OpenAI API key. Required if not logging in with an OpenAI account. Select from Obsidian's Keychain or create a new secret.",
-			)
-			.addComponent((el) =>
-				new SecretComponent(this.app, el)
-					.setValue(codex.apiKeySecretId)
-					.onChange(async (value) => {
-						this.plugin.settings.codex.apiKeySecretId = value;
-						await this.plugin.saveSettings();
-					}),
+		const envDescParts = ["Enter KEY=VALUE pairs, one per line."];
+		if (def.settingsCopy.envDescExtra) {
+			envDescParts.push(def.settingsCopy.envDescExtra);
+		}
+		if (def.apiKey) {
+			envDescParts.push(
+				`${def.apiKey.envVarName} is derived from the field above.`,
 			);
+		}
 
-		const codexPathSetting = new Setting(sectionEl)
-			.setName("Path")
-			.setDesc(
-				'Command name or path to codex-acp. Use just "codex-acp" to let the login shell resolve it, or enter an absolute path.',
-			)
-			.addText((text) => {
-				text.setPlaceholder("codex-acp")
-					.setValue(codex.command)
-					.onChange(async (value) => {
-						this.plugin.settings.codex.command = value.trim();
-						await this.plugin.saveSettings();
-					});
-			});
-		this.addAutoDetectButton(
-			codexPathSetting,
-			"codex-acp",
-			async (path) => {
-				this.plugin.settings.codex.command = path;
-				await this.plugin.saveSettings();
-			},
-		);
-		this.addInstallHint(sectionEl, "@zed-industries/codex-acp");
-
-		new Setting(sectionEl)
-			.setName("Arguments")
-			.setDesc(
-				"Enter one argument per line. Leave empty to run without arguments.",
-			)
-			.addTextArea((text) => {
-				text.setPlaceholder("")
-					.setValue(this.formatArgs(codex.args))
-					.onChange(async (value) => {
-						this.plugin.settings.codex.args = this.parseArgs(value);
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.rows = 3;
-			});
-
-		new Setting(sectionEl)
+		new Setting(bodyEl)
 			.setName("Environment variables")
-			.setDesc(
-				"Enter KEY=VALUE pairs, one per line. OPENAI_API_KEY is derived from the field above.",
-			)
+			.setDesc(envDescParts.join(" "))
 			.addTextArea((text) => {
-				text.setPlaceholder("")
-					.setValue(this.formatEnv(codex.env))
+				text.setPlaceholder(def.settingsCopy.envPlaceholder ?? "")
+					.setValue(this.formatEnv(preset.env))
 					.onChange(async (value) => {
-						this.plugin.settings.codex.env = this.parseEnv(value);
-						await this.plugin.saveSettings();
+						await this.updatePresetAgent(def.presetId, {
+							env: this.parseEnv(value),
+						});
 					});
 				text.inputEl.rows = 3;
 			});
@@ -1125,9 +1267,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						args: [],
 						env: [],
 					});
+					// Open the new agent's section so it can be configured
+					// right away.
+					this.openSections.add(`custom:${newId}`);
 					this.plugin.ensureDefaultAgentId();
-					await this.plugin.saveSettings();
-					this.display();
+					await this.flushSettings();
+					this.refreshDisplay();
 				});
 		});
 	}
@@ -1141,7 +1286,46 @@ export class AgentClientSettingTab extends PluginSettingTab {
 			cls: "agent-client-custom-agent",
 		});
 
-		const idSetting = new Setting(blockEl)
+		this.renderCollapsibleAgentSection(
+			blockEl,
+			`custom:${agent.id}`,
+			agent.displayName || agent.id,
+			{
+				getAgentId: () => this.plugin.settings.customAgents[index]?.id,
+				currentValue: isAgentEnabled(agent),
+				write: (value) => {
+					this.plugin.settings.customAgents[index].enabled = value;
+				},
+			},
+			(bodyEl, nameEl) =>
+				this.renderCustomAgentBody(bodyEl, nameEl, agent, index),
+			(summaryEl) => {
+				// Delete lives in the summary row (next to the Enabled
+				// toggle) so it clearly removes the whole agent — inside the
+				// body it read as deleting just the Agent ID.
+				new ExtraButtonComponent(summaryEl)
+					.setIcon("trash")
+					.setTooltip("Delete this agent")
+					.onClick(async () => {
+						this.plugin.settings.customAgents.splice(index, 1);
+						// Deleting the last enabled agent must not leave
+						// everything disabled.
+						this.plugin.ensureAtLeastOneEnabled();
+						this.plugin.ensureDefaultAgentId();
+						await this.flushSettings();
+						this.refreshDisplay();
+					});
+			},
+		);
+	}
+
+	private renderCustomAgentBody(
+		bodyEl: HTMLElement,
+		summaryNameEl: HTMLElement,
+		agent: CustomAgentSettings,
+		index: number,
+	) {
+		new Setting(bodyEl)
 			.setName("Agent ID")
 			.setDesc("Unique identifier used to reference this agent.")
 			.addText((text) => {
@@ -1157,30 +1341,72 @@ export class AgentClientSettingTab extends PluginSettingTab {
 							text.setValue(nextId);
 						}
 						this.plugin.settings.customAgents[index].id = nextId;
+						this.rekeyOpenSection(previousId, nextId);
 						if (
 							this.plugin.settings.defaultAgentId === previousId
 						) {
 							this.plugin.settings.defaultAgentId = nextId;
 						}
 						this.plugin.ensureDefaultAgentId();
-						await this.plugin.saveSettings();
+						await this.flushSettings();
 						this.refreshAgentDropdown();
 					});
+				// Captured on focus: was the custom being edited the default
+				// agent? At blur time `defaultAgentId === presetId` is
+				// ambiguous — either onChange's keystroke-retargeting followed
+				// this edit, or the default pointed at the preset all along —
+				// and only the former should follow the repair rename.
+				let wasDefaultAtFocus = false;
+				text.inputEl.addEventListener("focus", () => {
+					const currentId =
+						this.plugin.settings.customAgents[index]?.id;
+					wasDefaultAtFocus =
+						currentId !== undefined &&
+						this.plugin.settings.defaultAgentId === currentId;
+				});
+				// Preset ids are reserved. Validate on blur, not per
+				// keystroke: onChange commits every intermediate value, so a
+				// mid-typing collision check would misfire.
+				text.inputEl.addEventListener("blur", () => {
+					const committed =
+						this.plugin.settings.customAgents[index]?.id;
+					if (
+						!committed ||
+						!PRESET_AGENTS.some((def) => def.presetId === committed)
+					) {
+						return;
+					}
+					const taken = new Set<string>(
+						PRESET_AGENTS.map((def) => def.presetId),
+					);
+					this.plugin.settings.customAgents.forEach((item, i) => {
+						if (i !== index) {
+							taken.add(item.id);
+						}
+					});
+					let suffix = 2;
+					let candidate = `${committed}-${suffix}`;
+					while (taken.has(candidate)) {
+						suffix += 1;
+						candidate = `${committed}-${suffix}`;
+					}
+					this.plugin.settings.customAgents[index].id = candidate;
+					this.rekeyOpenSection(committed, candidate);
+					if (wasDefaultAtFocus) {
+						this.plugin.settings.defaultAgentId = candidate;
+					}
+					text.setValue(candidate);
+					new Notice(
+						`[Agent Client] "${committed}" is reserved for a preset agent. This custom agent was renamed to "${candidate}".`,
+					);
+					this.plugin.ensureDefaultAgentId();
+					void this.flushSettings().then(() => {
+						this.refreshAgentDropdown();
+					});
+				});
 			});
 
-		idSetting.addExtraButton((button) => {
-			button
-				.setIcon("trash")
-				.setTooltip("Delete this agent")
-				.onClick(async () => {
-					this.plugin.settings.customAgents.splice(index, 1);
-					this.plugin.ensureDefaultAgentId();
-					await this.plugin.saveSettings();
-					this.display();
-				});
-		});
-
-		new Setting(blockEl)
+		new Setting(bodyEl)
 			.setName("Display name")
 			.setDesc("Shown in menus and headers.")
 			.addText((text) => {
@@ -1188,16 +1414,21 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.setValue(agent.displayName || agent.id)
 					.onChange(async (value) => {
 						const trimmed = value.trim();
-						this.plugin.settings.customAgents[index].displayName =
+						const next =
 							trimmed.length > 0
 								? trimmed
 								: this.plugin.settings.customAgents[index].id;
-						await this.plugin.saveSettings();
+						this.plugin.settings.customAgents[index].displayName =
+							next;
+						// Keep the collapsed-summary label in sync without a
+						// re-render (which would drop focus mid-typing).
+						summaryNameEl.setText(next);
+						await this.flushSettings();
 						this.refreshAgentDropdown();
 					});
 			});
 
-		new Setting(blockEl)
+		new Setting(bodyEl)
 			.setName("Path")
 			.setDesc(
 				"Command name or path to the custom agent. Use just the command name to let the login shell resolve it, or enter an absolute path.",
@@ -1208,11 +1439,11 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.customAgents[index].command =
 							value.trim();
-						await this.plugin.saveSettings();
+						await this.flushSettings();
 					});
 			});
 
-		new Setting(blockEl)
+		new Setting(bodyEl)
 			.setName("Arguments")
 			.setDesc(
 				"Enter one argument per line. Leave empty to run without arguments.",
@@ -1223,12 +1454,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.customAgents[index].args =
 							this.parseArgs(value);
-						await this.plugin.saveSettings();
+						await this.flushSettings();
 					});
 				text.inputEl.rows = 3;
 			});
 
-		new Setting(blockEl)
+		new Setting(bodyEl)
 			.setName("Environment variables")
 			.setDesc(
 				"Enter KEY=VALUE pairs, one per line. (Stored as plain text)",
@@ -1239,27 +1470,41 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.customAgents[index].env =
 							this.parseEnv(value);
-						await this.plugin.saveSettings();
+						await this.flushSettings();
 					});
 				text.inputEl.rows = 3;
 			});
 	}
 
+	/**
+	 * Flush the current `plugin.settings` state through `settingsService.updateSettings()`
+	 * so that React components subscribed via `useSettings` re-render.
+	 *
+	 * Use this after calling legacy helpers (e.g. `ensureDefaultAgentId`) that mutate
+	 * `plugin.settings` directly. Passes the current values as the "update" to trigger
+	 * the notification pipeline without re-merging.
+	 */
+	private async flushSettings(): Promise<void> {
+		await this.plugin.settingsService.updateSettings({
+			// Emit a fresh array + fresh elements so the customAgents reference
+			// flips on every edit. SettingsTab mutates custom agents in place
+			// (e.g. customAgents[i].displayName = …); without this the reference
+			// is carried through updateSettings unchanged and slice subscribers
+			// (ChatPanel via useSettingsSelector) can't detect the change (#341/#4).
+			customAgents: this.plugin.settings.customAgents.map((a) => ({
+				...a,
+			})),
+			defaultAgentId: this.plugin.settings.defaultAgentId,
+		});
+	}
+
 	private generateCustomAgentDisplayName(): string {
 		const base = "Custom agent";
 		const existing = new Set<string>();
-		existing.add(
-			this.plugin.settings.claude.displayName ||
-				this.plugin.settings.claude.id,
-		);
-		existing.add(
-			this.plugin.settings.codex.displayName ||
-				this.plugin.settings.codex.id,
-		);
-		existing.add(
-			this.plugin.settings.gemini.displayName ||
-				this.plugin.settings.gemini.id,
-		);
+		for (const def of PRESET_AGENTS) {
+			const preset = this.plugin.settings.presetAgents[def.presetId];
+			existing.add(preset?.displayName || def.presetId);
+		}
 		for (const item of this.plugin.settings.customAgents) {
 			existing.add(item.displayName || item.id);
 		}
@@ -1294,19 +1539,18 @@ export class AgentClientSettingTab extends PluginSettingTab {
 	}
 
 	/**
-	 * Renders a copyable npm install command hint below a Path setting.
+	 * Renders a copyable install command hint below a Path setting.
 	 */
-	private addInstallHint(containerEl: HTMLElement, npmPackage: string): void {
-		const command = `npm install -g ${npmPackage}@latest`;
-		const frag = document.createDocumentFragment();
-		frag.append("Not installed? Run in terminal: ");
-		frag.appendChild(document.createElement("code")).textContent = command;
+	private addInstallHint(containerEl: HTMLElement, command: string): void {
+		const frag = createFragment();
+		frag.appendText("Not installed? Run in terminal: ");
+		frag.createEl("code", { text: command });
 		new Setting(containerEl).setDesc(frag).addButton((btn) => {
 			btn.setButtonText("Copy").onClick(() => {
 				void navigator.clipboard.writeText(command).then(
 					() => {
 						btn.setButtonText("Copied!");
-						setTimeout(() => {
+						window.setTimeout(() => {
 							btn.setButtonText("Copy");
 						}, 1500);
 					},
@@ -1346,17 +1590,17 @@ export class AgentClientSettingTab extends PluginSettingTab {
 							: await resolveCommandPath(commandName);
 						if (found) {
 							await onResolved(found);
-							this.display();
+							this.refreshDisplay();
 						} else {
 							btn.setButtonText("Not found");
-							setTimeout(() => {
+							window.setTimeout(() => {
 								btn.setButtonText("Auto-detect");
 								btn.setDisabled(false);
 							}, 2000);
 						}
 					} catch {
 						btn.setButtonText("Error");
-						setTimeout(() => {
+						window.setTimeout(() => {
 							btn.setButtonText("Auto-detect");
 							btn.setDisabled(false);
 						}, 2000);

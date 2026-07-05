@@ -44,7 +44,6 @@ export interface UseChatActionsReturn {
 
 	// Config actions
 	handleSetMode: (modeId: string) => Promise<void>;
-	handleSetModel: (modelId: string) => Promise<void>;
 	handleSetConfigOption: (configId: string, value: string) => Promise<void>;
 
 	// UI state actions
@@ -76,8 +75,11 @@ export function useChatActions(
 	suggestions: UseSuggestionsReturn,
 	session: ChatSession,
 	messages: ChatMessage[],
-	settings: AgentClientPluginSettings,
+	// Only windowsWslMode is read reactively here; exportSettings are read
+	// live from plugin.settings. Narrow so ChatPanel can pass a settings slice.
+	settings: Pick<AgentClientPluginSettings, "windowsWslMode">,
 	vaultPath: string,
+	persistentEmbedId?: string,
 ): UseChatActionsReturn {
 	const logger = getLogger();
 
@@ -178,9 +180,7 @@ export function useChatActions(
 			}
 
 			await agent.sendMessage(content, {
-				activeNote: settings.autoMentionActiveNote
-					? suggestions.mentions.activeNote
-					: null,
+				activeNote: suggestions.mentions.activeNote,
 				vaultBasePath: vaultPath,
 				isAutoMentionDisabled:
 					suggestions.mentions.isAutoMentionDisabled,
@@ -195,6 +195,7 @@ export function useChatActions(
 				await sessionHistory.saveSessionLocally(
 					session.sessionId,
 					content,
+					persistentEmbedId,
 				);
 				logger.log(
 					`[ChatPanel] Session saved locally: ${session.sessionId}`,
@@ -207,8 +208,8 @@ export function useChatActions(
 			messages.length,
 			session.sessionId,
 			sessionHistory.saveSessionLocally,
+			persistentEmbedId,
 			logger,
-			settings.autoMentionActiveNote,
 			suggestions.mentions.activeNote,
 			suggestions.mentions.isAutoMentionDisabled,
 			shouldConvertToWsl,
@@ -346,13 +347,6 @@ export function useChatActions(
 		[agent.setMode],
 	);
 
-	const handleSetModel = useCallback(
-		async (modelId: string) => {
-			await agent.setModel(modelId);
-		},
-		[agent.setModel],
-	);
-
 	const handleSetConfigOption = useCallback(
 		async (configId: string, value: string) => {
 			await agent.setConfigOption(configId, value);
@@ -388,7 +382,6 @@ export function useChatActions(
 		handleSwitchAgent,
 		handleRestartAgent,
 		handleSetMode,
-		handleSetModel,
 		handleSetConfigOption,
 		handleClearError,
 		handleClearAgentUpdate,

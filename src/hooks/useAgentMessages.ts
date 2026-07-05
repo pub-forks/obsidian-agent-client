@@ -18,10 +18,12 @@ import type {
 import type { ChatSession, SessionUpdate } from "../types/session";
 import type { AcpClient } from "../acp/acp-client";
 import type { IVaultAccess, NoteMetadata } from "../services/vault-service";
+import type { IWikilinkResolver } from "../utils/wikilink-resolver";
 import type { ISettingsAccess } from "../services/settings-service";
 import type { ErrorInfo } from "../types/errors";
 import type { IMentionService } from "../utils/mention-parser";
 import { preparePrompt, sendPreparedPrompt } from "../services/message-sender";
+import { extractErrorMessage } from "../utils/error-utils";
 import { Platform } from "obsidian";
 import {
 	rebuildToolCallIndex,
@@ -95,7 +97,7 @@ export interface UseAgentMessagesReturn {
 export function useAgentMessages(
 	agentClient: AcpClient,
 	settingsAccess: ISettingsAccess,
-	vaultAccess: IVaultAccess & IMentionService,
+	vaultAccess: IVaultAccess & IMentionService & IWikilinkResolver,
 	session: ChatSession,
 	setErrorInfo: (error: ErrorInfo | null) => void,
 ): UseAgentMessagesReturn {
@@ -155,7 +157,7 @@ export function useAgentMessages(
 			pendingUpdatesRef.current.push(update);
 			if (!flushScheduledRef.current) {
 				flushScheduledRef.current = true;
-				requestAnimationFrame(flushPendingUpdates);
+				window.requestAnimationFrame(flushPendingUpdates);
 			}
 		},
 		[flushPendingUpdates],
@@ -182,10 +184,41 @@ export function useAgentMessages(
 		ignoreUpdatesRef.current = ignore;
 	}, []);
 
-	/** Discard any pending RAF updates and reset the streaming flag. */
+	/**
+	 * Cancel-time cleanup. Discards in-flight streaming updates so they don't
+	 * bleed into the next reply (#200), but still applies any queued permission
+	 * lifecycle updates (cancel/response) so the permission banner clears
+	 * instead of staying stuck (#326).
+	 */
 	const clearPendingUpdates = useCallback((): void => {
+		const queued = pendingUpdatesRef.current;
 		pendingUpdatesRef.current = [];
 		flushScheduledRef.current = false;
+
+		// Streaming deltas are dropped; only terminal permission updates
+		// (cancelled or answered) are applied so `findActivePermission` stops
+		// returning the request. Active/pending permission updates are not
+		// replayed, so a cancel can never re-surface an active banner.
+		const permissionUpdates = queued.filter(
+			(u) =>
+				(u.type === "tool_call" || u.type === "tool_call_update") &&
+				(u.permissionRequest?.isCancelled === true ||
+					u.permissionRequest?.selectedOptionId !== undefined),
+		);
+		if (permissionUpdates.length > 0) {
+			setMessages((prev) => {
+				let result = prev;
+				for (const update of permissionUpdates) {
+					result = applySingleUpdate(
+						result,
+						update,
+						toolCallIndexRef.current,
+					);
+				}
+				return result;
+			});
+		}
+
 		setIsSending(false);
 	}, []);
 
@@ -284,6 +317,8 @@ export function useAgentMessages(
 								tables: settings.promptInjection.tables,
 							}
 						: undefined,
+					expandWikilinkContext: settings.expandWikilinkContext,
+					wikilinkResolver: vaultAccess,
 				},
 				vaultAccess,
 				vaultAccess, // IMentionService (same object)
@@ -375,7 +410,7 @@ export function useAgentMessages(
 					setIsSending(false);
 					setErrorInfo({
 						title: "Send Message Failed",
-						message: `Failed to send message: ${error instanceof Error ? error.message : String(error)}`,
+						message: `Failed to send message: ${extractErrorMessage(error)}`,
 					});
 				}
 			})();
@@ -420,7 +455,7 @@ export function useAgentMessages(
 			} catch (error) {
 				setErrorInfo({
 					title: "Permission Error",
-					message: `Failed to respond to permission request: ${error instanceof Error ? error.message : String(error)}`,
+					message: `Failed to respond to permission request: ${extractErrorMessage(error)}`,
 				});
 			}
 		},

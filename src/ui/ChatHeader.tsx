@@ -1,8 +1,39 @@
 import * as React from "react";
-const { useRef, useEffect } = React;
+const { useRef, useEffect, useMemo } = React;
 import { setIcon, DropdownComponent } from "obsidian";
 import { HeaderButton } from "./shared/IconButton";
 import type { AgentDisplayInfo } from "../services/session-helpers";
+
+/** Stable empty list for the pinned-agent case (no switchable agents). */
+const EMPTY_AGENTS: AgentDisplayInfo[] = [];
+
+/**
+ * Selector options = enabled agents, plus the active agent appended as an
+ * explicit "(disabled)" option when it is not in the enabled enumeration
+ * (kept session or pinned block on a disabled agent). Without it the
+ * dropdown's setValue silently no-ops and the selector renders blank.
+ * Returns `availableAgents` by reference when no append is needed, so the
+ * dropdown-rebuild effect doesn't re-run on ordinary agent switches.
+ */
+function useSelectorAgents(
+	availableAgents: AgentDisplayInfo[] | undefined,
+	currentAgentId: string | undefined,
+	agentLabel: string,
+): AgentDisplayInfo[] {
+	return useMemo(() => {
+		if (!availableAgents) return EMPTY_AGENTS;
+		if (
+			!currentAgentId ||
+			availableAgents.some((agent) => agent.id === currentAgentId)
+		) {
+			return availableAgents;
+		}
+		return [
+			...availableAgents,
+			{ id: currentAgentId, displayName: `${agentLabel} (disabled)` },
+		];
+	}, [availableAgents, currentAgentId, agentLabel]);
+}
 
 // ============================================================================
 // Props Types
@@ -17,8 +48,6 @@ export interface SidebarHeaderProps {
 	agentLabel: string;
 	/** Whether a plugin update is available */
 	isUpdateAvailable: boolean;
-	/** Whether session history is supported (show History button) */
-	hasHistoryCapability?: boolean;
 	/** Callback to create a new chat session */
 	onNewChat: () => void;
 	/** Callback to export the chat */
@@ -53,9 +82,36 @@ export interface FloatingHeaderProps {
 }
 
 /**
+ * Props for the embedded variant of ChatHeader
+ * (used in code-block / embedded chat contexts).
+ *
+ * Unlike FloatingHeaderProps, the agent-selection fields are optional:
+ * when the block pins an agent (config.agent set), ChatPanel passes
+ * `undefined` so the selector is hidden and switching is disabled.
+ */
+export interface EmbeddedHeaderProps {
+	variant: "embedded";
+	/** Display name of the active agent */
+	agentLabel: string;
+	/** Whether a plugin update is available */
+	isUpdateAvailable: boolean;
+	/** Available agents for switching (omitted when the block pins an agent) */
+	availableAgents?: AgentDisplayInfo[];
+	/** Current agent ID */
+	currentAgentId?: string;
+	/** Callback to switch agent (omitted when the block pins an agent) */
+	onAgentChange?: (agentId: string) => void;
+	/** Callback to show the More menu at the click position */
+	onShowMenu: (e: React.MouseEvent<HTMLElement>) => void;
+}
+
+/**
  * Union type for ChatHeader props - dispatches based on variant
  */
-export type ChatHeaderProps = SidebarHeaderProps | FloatingHeaderProps;
+export type ChatHeaderProps =
+	| SidebarHeaderProps
+	| FloatingHeaderProps
+	| EmbeddedHeaderProps;
 
 // ============================================================================
 // Internal Components
@@ -105,7 +161,6 @@ function NavActionButton({
 function SidebarHeader({
 	agentLabel,
 	isUpdateAvailable,
-	hasHistoryCapability = false,
 	onNewChat,
 	onExportChat,
 	onShowMenu,
@@ -180,13 +235,19 @@ function FloatingHeader({
 	const onAgentChangeRef = useRef(onAgentChange);
 	onAgentChangeRef.current = onAgentChange;
 
+	const selectorAgents = useSelectorAgents(
+		availableAgents,
+		currentAgentId,
+		agentLabel,
+	);
+
 	// Initialize agent dropdown
 	useEffect(() => {
 		const containerEl = agentDropdownRef.current;
 		if (!containerEl) return;
 
 		// Only show dropdown if there are multiple agents
-		if (availableAgents.length <= 1) {
+		if (selectorAgents.length <= 1) {
 			if (agentDropdownInstance.current) {
 				containerEl.empty();
 				agentDropdownInstance.current = null;
@@ -200,7 +261,7 @@ function FloatingHeader({
 			agentDropdownInstance.current = dropdown;
 
 			// Add options
-			for (const agent of availableAgents) {
+			for (const agent of selectorAgents) {
 				dropdown.addOption(agent.id, agent.displayName);
 			}
 
@@ -215,14 +276,14 @@ function FloatingHeader({
 			});
 		}
 
-		// Cleanup on unmount or when availableAgents change
+		// Cleanup on unmount or when the selector options change
 		return () => {
 			if (agentDropdownInstance.current) {
 				containerEl.empty();
 				agentDropdownInstance.current = null;
 			}
 		};
-	}, [availableAgents]);
+	}, [selectorAgents]);
 
 	// Update dropdown value when currentAgentId changes
 	useEffect(() => {
@@ -236,7 +297,7 @@ function FloatingHeader({
 			className={`agent-client-inline-header agent-client-inline-header-floating`}
 		>
 			<div className="agent-client-inline-header-main">
-				{availableAgents.length > 1 ? (
+				{selectorAgents.length > 1 ? (
 					<div className="agent-client-agent-selector">
 						<div ref={agentDropdownRef} />
 						<span
@@ -283,14 +344,133 @@ function FloatingHeader({
 }
 
 // ============================================================================
+// Embedded Header
+// ============================================================================
+
+/**
+ * Inline header component for embedded (code-block) chat views.
+ *
+ * Mirrors FloatingHeader's layout/agent-dropdown logic, but:
+ * - has no minimize/close buttons (not a windowed view)
+ * - hides the agent selector when no switchable agents are provided
+ *   (i.e. the block pins an agent, or only one agent is available)
+ */
+function EmbeddedHeader({
+	agentLabel,
+	availableAgents,
+	currentAgentId,
+	isUpdateAvailable,
+	onAgentChange,
+	onShowMenu,
+}: EmbeddedHeaderProps) {
+	// Refs for agent dropdown
+	const agentDropdownRef = useRef<HTMLDivElement>(null);
+	const agentDropdownInstance = useRef<DropdownComponent | null>(null);
+
+	// Stable ref for onAgentChange callback
+	const onAgentChangeRef = useRef(onAgentChange);
+	onAgentChangeRef.current = onAgentChange;
+
+	const selectorAgents = useSelectorAgents(
+		availableAgents,
+		currentAgentId,
+		agentLabel,
+	);
+
+	// Initialize agent dropdown (only when multiple switchable agents exist)
+	useEffect(() => {
+		const containerEl = agentDropdownRef.current;
+		if (!containerEl) return;
+
+		if (selectorAgents.length <= 1) {
+			if (agentDropdownInstance.current) {
+				containerEl.empty();
+				agentDropdownInstance.current = null;
+			}
+			return;
+		}
+
+		if (!agentDropdownInstance.current) {
+			const dropdown = new DropdownComponent(containerEl);
+			agentDropdownInstance.current = dropdown;
+
+			for (const agent of selectorAgents) {
+				dropdown.addOption(agent.id, agent.displayName);
+			}
+
+			if (currentAgentId) {
+				dropdown.setValue(currentAgentId);
+			}
+
+			dropdown.onChange((value) => {
+				onAgentChangeRef.current?.(value);
+			});
+		}
+
+		return () => {
+			if (agentDropdownInstance.current) {
+				containerEl.empty();
+				agentDropdownInstance.current = null;
+			}
+		};
+	}, [selectorAgents]);
+
+	// Keep dropdown value in sync with currentAgentId
+	useEffect(() => {
+		if (agentDropdownInstance.current && currentAgentId) {
+			agentDropdownInstance.current.setValue(currentAgentId);
+		}
+	}, [currentAgentId]);
+
+	const hasSelector = selectorAgents.length > 1;
+
+	return (
+		<div className="agent-client-inline-header agent-client-inline-header-embedded">
+			<div className="agent-client-inline-header-main">
+				{hasSelector ? (
+					<div className="agent-client-agent-selector">
+						<div ref={agentDropdownRef} />
+						<span
+							className="agent-client-agent-selector-icon"
+							ref={(el) => {
+								if (el) setIcon(el, "chevron-down");
+							}}
+						/>
+					</div>
+				) : (
+					<span className="agent-client-agent-label">
+						{agentLabel}
+					</span>
+				)}
+			</div>
+			{isUpdateAvailable && (
+				<p className="agent-client-chat-view-header-update">
+					Plugin update available!
+				</p>
+			)}
+			<div className="agent-client-inline-header-actions">
+				<HeaderButton
+					iconName="more-vertical"
+					tooltip="More"
+					onClick={onShowMenu}
+				/>
+			</div>
+		</div>
+	);
+}
+
+// ============================================================================
 // Exported ChatHeader (Dispatcher)
 // ============================================================================
 
 /**
- * ChatHeader component that dispatches to SidebarHeader or FloatingHeader
- * based on the `variant` prop.
+ * ChatHeader component that dispatches to SidebarHeader, FloatingHeader,
+ * or EmbeddedHeader based on the `variant` prop.
  */
 export function ChatHeader(props: ChatHeaderProps) {
+	if (props.variant === "embedded") {
+		return <EmbeddedHeader {...props} />;
+	}
 	if (props.variant === "floating") {
 		return <FloatingHeader {...props} />;
 	}
