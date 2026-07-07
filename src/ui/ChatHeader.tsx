@@ -1,7 +1,7 @@
 import * as React from "react";
 const { useRef, useEffect, useMemo } = React;
 import { setIcon, DropdownComponent } from "obsidian";
-import { HeaderButton } from "./shared/IconButton";
+import { HeaderButton, IconButton } from "./shared/IconButton";
 import type { AgentDisplayInfo } from "../services/session-helpers";
 
 /** Stable empty list for the pinned-agent case (no switchable agents). */
@@ -33,6 +33,99 @@ function useSelectorAgents(
 			{ id: currentAgentId, displayName: `${agentLabel} (disabled)` },
 		];
 	}, [availableAgents, currentAgentId, agentLabel]);
+}
+
+/**
+ * Shared agent-selector dropdown logic for FloatingHeader / EmbeddedHeader.
+ *
+ * Builds an Obsidian DropdownComponent inside `dropdownContainerRef` when
+ * there is more than one selectable agent, keeps its value in sync with
+ * `currentAgentId`, and renders the chevron icon into `chevronRef`.
+ * `onAgentChange` is read through a ref so the build effect only depends on
+ * `selectorAgents` (which `useSelectorAgents` keeps referentially stable).
+ */
+function useAgentDropdown({
+	selectorAgents,
+	currentAgentId,
+	onAgentChange,
+}: {
+	selectorAgents: AgentDisplayInfo[];
+	currentAgentId: string | undefined;
+	onAgentChange: ((agentId: string) => void) | undefined;
+}): {
+	dropdownContainerRef: React.RefObject<HTMLDivElement>;
+	chevronRef: React.RefObject<HTMLSpanElement>;
+} {
+	const dropdownContainerRef = useRef<HTMLDivElement>(null);
+	const dropdownInstance = useRef<DropdownComponent | null>(null);
+	const chevronRef = useRef<HTMLSpanElement>(null);
+
+	// Stable ref for onAgentChange callback
+	const onAgentChangeRef = useRef(onAgentChange);
+	onAgentChangeRef.current = onAgentChange;
+
+	// Initialize agent dropdown
+	useEffect(() => {
+		const containerEl = dropdownContainerRef.current;
+		if (!containerEl) return;
+
+		// Only show dropdown if there are multiple agents
+		if (selectorAgents.length <= 1) {
+			if (dropdownInstance.current) {
+				containerEl.empty();
+				dropdownInstance.current = null;
+			}
+			return;
+		}
+
+		// Create dropdown if not exists
+		if (!dropdownInstance.current) {
+			const dropdown = new DropdownComponent(containerEl);
+			dropdownInstance.current = dropdown;
+
+			// Add options
+			for (const agent of selectorAgents) {
+				dropdown.addOption(agent.id, agent.displayName);
+			}
+
+			// Set initial value
+			if (currentAgentId) {
+				dropdown.setValue(currentAgentId);
+			}
+
+			// Handle change
+			dropdown.onChange((value) => {
+				onAgentChangeRef.current?.(value);
+			});
+		}
+
+		// Cleanup on unmount or when the selector options change
+		return () => {
+			if (dropdownInstance.current) {
+				containerEl.empty();
+				dropdownInstance.current = null;
+			}
+		};
+		// currentAgentId is intentionally omitted: it is only read when the
+		// dropdown is first created; later changes go through the sync effect.
+	}, [selectorAgents]);
+
+	// Update dropdown value when currentAgentId changes
+	useEffect(() => {
+		if (dropdownInstance.current && currentAgentId) {
+			dropdownInstance.current.setValue(currentAgentId);
+		}
+	}, [currentAgentId]);
+
+	// Render the chevron icon whenever the selector (re)appears.
+	// The chevron span only mounts/unmounts when `selectorAgents` changes.
+	useEffect(() => {
+		if (chevronRef.current) {
+			setIcon(chevronRef.current, "chevron-down");
+		}
+	}, [selectorAgents]);
+
+	return { dropdownContainerRef, chevronRef };
 }
 
 // ============================================================================
@@ -119,7 +212,7 @@ export type ChatHeaderProps =
 
 /**
  * A single action button matching Obsidian's nav-action-button pattern.
- * Uses setIcon() to render Lucide icons identically to native sidebar buttons.
+ * Thin wrapper around the shared IconButton with the nav-action classes.
  */
 function NavActionButton({
 	icon,
@@ -130,19 +223,11 @@ function NavActionButton({
 	label: string;
 	onClick: (e: React.MouseEvent<HTMLDivElement>) => void;
 }) {
-	const ref = useRef<HTMLDivElement>(null);
-
-	useEffect(() => {
-		if (ref.current) {
-			setIcon(ref.current, icon);
-		}
-	}, [icon]);
-
 	return (
-		<div
-			ref={ref}
+		<IconButton
+			iconName={icon}
+			label={label}
 			className="clickable-icon nav-action-button"
-			aria-label={label}
 			onClick={onClick}
 		/>
 	);
@@ -227,70 +312,17 @@ function FloatingHeader({
 	onMinimize,
 	onClose,
 }: FloatingHeaderProps) {
-	// Refs for agent dropdown
-	const agentDropdownRef = useRef<HTMLDivElement>(null);
-	const agentDropdownInstance = useRef<DropdownComponent | null>(null);
-
-	// Stable ref for onAgentChange callback
-	const onAgentChangeRef = useRef(onAgentChange);
-	onAgentChangeRef.current = onAgentChange;
-
 	const selectorAgents = useSelectorAgents(
 		availableAgents,
 		currentAgentId,
 		agentLabel,
 	);
 
-	// Initialize agent dropdown
-	useEffect(() => {
-		const containerEl = agentDropdownRef.current;
-		if (!containerEl) return;
-
-		// Only show dropdown if there are multiple agents
-		if (selectorAgents.length <= 1) {
-			if (agentDropdownInstance.current) {
-				containerEl.empty();
-				agentDropdownInstance.current = null;
-			}
-			return;
-		}
-
-		// Create dropdown if not exists
-		if (!agentDropdownInstance.current) {
-			const dropdown = new DropdownComponent(containerEl);
-			agentDropdownInstance.current = dropdown;
-
-			// Add options
-			for (const agent of selectorAgents) {
-				dropdown.addOption(agent.id, agent.displayName);
-			}
-
-			// Set initial value
-			if (currentAgentId) {
-				dropdown.setValue(currentAgentId);
-			}
-
-			// Handle change
-			dropdown.onChange((value) => {
-				onAgentChangeRef.current?.(value);
-			});
-		}
-
-		// Cleanup on unmount or when the selector options change
-		return () => {
-			if (agentDropdownInstance.current) {
-				containerEl.empty();
-				agentDropdownInstance.current = null;
-			}
-		};
-	}, [selectorAgents]);
-
-	// Update dropdown value when currentAgentId changes
-	useEffect(() => {
-		if (agentDropdownInstance.current && currentAgentId) {
-			agentDropdownInstance.current.setValue(currentAgentId);
-		}
-	}, [currentAgentId]);
+	const { dropdownContainerRef, chevronRef } = useAgentDropdown({
+		selectorAgents,
+		currentAgentId,
+		onAgentChange,
+	});
 
 	return (
 		<div
@@ -299,12 +331,10 @@ function FloatingHeader({
 			<div className="agent-client-inline-header-main">
 				{selectorAgents.length > 1 ? (
 					<div className="agent-client-agent-selector">
-						<div ref={agentDropdownRef} />
+						<div ref={dropdownContainerRef} />
 						<span
 							className="agent-client-agent-selector-icon"
-							ref={(el) => {
-								if (el) setIcon(el, "chevron-down");
-							}}
+							ref={chevronRef}
 						/>
 					</div>
 				) : (
@@ -363,64 +393,17 @@ function EmbeddedHeader({
 	onAgentChange,
 	onShowMenu,
 }: EmbeddedHeaderProps) {
-	// Refs for agent dropdown
-	const agentDropdownRef = useRef<HTMLDivElement>(null);
-	const agentDropdownInstance = useRef<DropdownComponent | null>(null);
-
-	// Stable ref for onAgentChange callback
-	const onAgentChangeRef = useRef(onAgentChange);
-	onAgentChangeRef.current = onAgentChange;
-
 	const selectorAgents = useSelectorAgents(
 		availableAgents,
 		currentAgentId,
 		agentLabel,
 	);
 
-	// Initialize agent dropdown (only when multiple switchable agents exist)
-	useEffect(() => {
-		const containerEl = agentDropdownRef.current;
-		if (!containerEl) return;
-
-		if (selectorAgents.length <= 1) {
-			if (agentDropdownInstance.current) {
-				containerEl.empty();
-				agentDropdownInstance.current = null;
-			}
-			return;
-		}
-
-		if (!agentDropdownInstance.current) {
-			const dropdown = new DropdownComponent(containerEl);
-			agentDropdownInstance.current = dropdown;
-
-			for (const agent of selectorAgents) {
-				dropdown.addOption(agent.id, agent.displayName);
-			}
-
-			if (currentAgentId) {
-				dropdown.setValue(currentAgentId);
-			}
-
-			dropdown.onChange((value) => {
-				onAgentChangeRef.current?.(value);
-			});
-		}
-
-		return () => {
-			if (agentDropdownInstance.current) {
-				containerEl.empty();
-				agentDropdownInstance.current = null;
-			}
-		};
-	}, [selectorAgents]);
-
-	// Keep dropdown value in sync with currentAgentId
-	useEffect(() => {
-		if (agentDropdownInstance.current && currentAgentId) {
-			agentDropdownInstance.current.setValue(currentAgentId);
-		}
-	}, [currentAgentId]);
+	const { dropdownContainerRef, chevronRef } = useAgentDropdown({
+		selectorAgents,
+		currentAgentId,
+		onAgentChange,
+	});
 
 	const hasSelector = selectorAgents.length > 1;
 
@@ -429,12 +412,10 @@ function EmbeddedHeader({
 			<div className="agent-client-inline-header-main">
 				{hasSelector ? (
 					<div className="agent-client-agent-selector">
-						<div ref={agentDropdownRef} />
+						<div ref={dropdownContainerRef} />
 						<span
 							className="agent-client-agent-selector-icon"
-							ref={(el) => {
-								if (el) setIcon(el, "chevron-down");
-							}}
+							ref={chevronRef}
 						/>
 					</div>
 				) : (

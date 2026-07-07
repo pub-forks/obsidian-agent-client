@@ -5,8 +5,9 @@
  * and the confirmation modal for session deletion.
  */
 
-import { Modal, App, setIcon } from "obsidian";
+import { Modal, App } from "obsidian";
 import { EditTitleModal } from "./EditTitleModal";
+import { IconButton } from "./shared/IconButton";
 import * as React from "react";
 const { useState, useCallback } = React;
 import { createRoot, Root } from "react-dom/client";
@@ -145,38 +146,6 @@ interface SessionHistoryContentProps {
 	onFetchSessions: (cwd?: string) => void;
 	/** Callback to close the modal */
 	onClose: () => void;
-}
-
-/**
- * Icon button component using Obsidian's setIcon.
- */
-function IconButton({
-	iconName,
-	label,
-	className,
-	onClick,
-}: {
-	iconName: string;
-	label: string;
-	className: string;
-	onClick: () => void;
-}) {
-	const iconRef = React.useRef<HTMLDivElement>(null);
-
-	React.useEffect(() => {
-		if (iconRef.current) {
-			setIcon(iconRef.current, iconName);
-		}
-	}, [iconName]);
-
-	return (
-		<div
-			ref={iconRef}
-			className={className}
-			aria-label={label}
-			onClick={onClick}
-		/>
-	);
 }
 
 /**

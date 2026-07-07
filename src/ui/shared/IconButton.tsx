@@ -24,6 +24,38 @@ export function LucideIcon({
 	return <span ref={ref} className={className} />;
 }
 
+/**
+ * Icon button component using Obsidian's setIcon.
+ */
+export function IconButton({
+	iconName,
+	label,
+	className,
+	onClick,
+}: {
+	iconName: string;
+	label: string;
+	className: string;
+	onClick: (e: React.MouseEvent<HTMLDivElement>) => void;
+}) {
+	const iconRef = React.useRef<HTMLDivElement>(null);
+
+	React.useEffect(() => {
+		if (iconRef.current) {
+			setIcon(iconRef.current, iconName);
+		}
+	}, [iconName]);
+
+	return (
+		<div
+			ref={iconRef}
+			className={className}
+			aria-label={label}
+			onClick={onClick}
+		/>
+	);
+}
+
 interface HeaderButtonProps {
 	iconName: string;
 	tooltip: string;
