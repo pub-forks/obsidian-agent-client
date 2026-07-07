@@ -352,6 +352,13 @@ export function useSessionHistory(
 	const canPerformAnyOperation =
 		capabilities.canLoad || capabilities.canResume || capabilities.canFork;
 
+	// Single source of truth for the local-session fallback, shared by
+	// fetchSessions and the exposed isUsingLocalSessions flag:
+	// - Agent doesn't support session/list, OR
+	// - Agent doesn't support any restoration operation (for delete only)
+	const shouldUseLocalSessions =
+		!capabilities.canList || !canPerformAnyOperation;
+
 	/**
 	 * Fetch sessions list from agent or local storage.
 	 * Uses agent's session/list if supported, otherwise falls back to local storage.
@@ -360,12 +367,6 @@ export function useSessionHistory(
 	 */
 	const fetchSessions = useCallback(
 		async (cwd?: string) => {
-			// Use local sessions if:
-			// - Agent doesn't support session/list, OR
-			// - Agent doesn't support any restoration operation (for delete only)
-			const shouldUseLocalSessions =
-				!capabilities.canList || !canPerformAnyOperation;
-
 			if (shouldUseLocalSessions) {
 				// Get locally saved sessions for this agent
 				const localSessions = settingsAccess.getSavedSessions(
@@ -456,7 +457,7 @@ export function useSessionHistory(
 		[
 			agentClient,
 			capabilities.canList,
-			canPerformAnyOperation,
+			shouldUseLocalSessions,
 			isCacheValid,
 			settingsAccess,
 			session.agentId,
@@ -840,7 +841,7 @@ export function useSessionHistory(
 			canRestore: capabilities.canLoad || capabilities.canResume,
 			canFork: capabilities.canFork,
 			canList: capabilities.canList,
-			isUsingLocalSessions: !capabilities.canList,
+			isUsingLocalSessions: shouldUseLocalSessions,
 			localSessionIds,
 
 			// Methods
