@@ -11,7 +11,6 @@
  */
 
 import { vi, type Mock } from "vitest";
-import type { TFile } from "obsidian";
 import type { IVaultAccess } from "../../src/services/vault-service";
 import type { IMentionService } from "../../src/utils/mention-parser";
 import type {
@@ -57,7 +56,7 @@ export function fakeVaultAccess(notes: Record<string, string>): FakeVault {
 				path,
 				basename: basenameOf(path),
 				stat: { mtime: FAKE_MTIME },
-			})) as unknown as TFile[],
+			})),
 		searchNotes: vi.fn(async () => []),
 		getActiveNote: vi.fn(async () => null),
 		listNotes: vi.fn(async () => []),

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { TFile } from "obsidian";
 import type { App } from "obsidian";
-import { getNoteWikiLinks } from "../src/utils/wikilink-resolver";
+import { getNoteWikiLinks } from "../src/services/wikilink-service";
 
 // getNoteWikiLinks reads from the metadata cache via an injected `app`. The
 // fake App exposes only what the resolver touches: vault.getFileByPath (source

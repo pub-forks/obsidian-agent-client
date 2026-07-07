@@ -1,9 +1,19 @@
-import { TFile } from "obsidian";
 import { getLogger } from "./logger";
+
+/**
+ * Structural stand-in for Obsidian's TFile (which is structurally compatible),
+ * keeping utils/ free of Obsidian imports. `stat.mtime` is required because
+ * message-sender's `processNote` reads it for the lastModified annotation.
+ */
+export interface MentionableFile {
+	basename: string;
+	path: string;
+	stat: { mtime: number };
+}
 
 // Interface for mention service to avoid circular dependency
 export interface IMentionService {
-	getAllFiles(): TFile[];
+	getAllFiles(): MentionableFile[];
 }
 
 // Mention detection utilities
@@ -104,10 +114,13 @@ export function replaceMention(
 export function extractMentionedNotes(
 	text: string,
 	noteMentionService: IMentionService,
-): Array<{ noteTitle: string; file: TFile | undefined }> {
+): Array<{ noteTitle: string; file: MentionableFile | undefined }> {
 	const mentionRegex = /@\[\[([^\]]+)\]\]/g;
 	const matches = Array.from(text.matchAll(mentionRegex));
-	const result: Array<{ noteTitle: string; file: TFile | undefined }> = [];
+	const result: Array<{
+		noteTitle: string;
+		file: MentionableFile | undefined;
+	}> = [];
 	const seen = new Set<string>(); // Avoid duplicates
 
 	for (const match of matches) {
@@ -120,7 +133,7 @@ export function extractMentionedNotes(
 		// Find the file by basename
 		const file = noteMentionService
 			.getAllFiles()
-			.find((f: TFile) => f.basename === noteTitle);
+			.find((f: MentionableFile) => f.basename === noteTitle);
 
 		result.push({ noteTitle, file });
 	}

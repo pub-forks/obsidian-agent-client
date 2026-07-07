@@ -17,12 +17,12 @@ import {
 import { EditorView } from "@codemirror/view";
 import { Compartment, StateEffect } from "@codemirror/state";
 import { getLogger, Logger } from "../utils/logger";
-import {
-	getNoteWikiLinks,
-	type IWikilinkResolver,
-	type LinkedNoteMetadata,
-	type LineRange,
+import type {
+	IWikilinkResolver,
+	LinkedNoteMetadata,
+	LineRange,
 } from "../utils/wikilink-resolver";
+import { getNoteWikiLinks } from "./wikilink-service";
 
 // ============================================================================
 // Port Types (from vault-access.port.ts)
