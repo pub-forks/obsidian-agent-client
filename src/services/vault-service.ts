@@ -124,7 +124,6 @@ export interface IVaultAccess {
  */
 export class VaultService implements IVaultAccess, IWikilinkResolver {
 	private files: TFile[] = [];
-	private lastBuild = 0;
 	private logger: Logger;
 	private vaultEventRefs: ReturnType<typeof this.plugin.app.vault.on>[] = [];
 
@@ -155,7 +154,6 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 
 	private rebuildIndex() {
 		this.files = this.plugin.app.vault.getMarkdownFiles();
-		this.lastBuild = Date.now();
 		this.logger.log(
 			`[VaultService] Rebuilt index with ${this.files.length} files`,
 		);

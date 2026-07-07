@@ -151,12 +151,6 @@ export interface SendPromptResult {
 
 	/** Error information if sending failed */
 	error?: AcpError;
-
-	/** Whether authentication is required */
-	requiresAuth?: boolean;
-
-	/** Whether the prompt was successfully sent after retry */
-	retriedSuccessfully?: boolean;
 }
 
 // ============================================================================
@@ -907,7 +901,6 @@ async function handleSendError(
 				success: false,
 				displayContent,
 				agentContent,
-				requiresAuth: true,
 				error: toAcpError(error, sessionId),
 			};
 		}
@@ -949,7 +942,6 @@ async function retryWithAuthentication(
 			success: true,
 			displayContent,
 			agentContent,
-			retriedSuccessfully: true,
 		};
 	} catch (retryError) {
 		// Convert retry error to AcpError

@@ -286,7 +286,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 	const suggestions = useSuggestions(
 		vaultService,
-		plugin,
 		session.availableCommands || EMPTY_COMMANDS,
 		settings.autoMentionActiveNote,
 		pinnedActiveNote,
@@ -315,7 +314,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 		agentClient: acpClient,
 		session,
 		settingsAccess: plugin.settingsService,
-		cwd: vaultPath,
 		agentCwd,
 		onSessionLoad: handleSessionLoad,
 		onMessagesRestore: agent.setMessagesFromLocal,

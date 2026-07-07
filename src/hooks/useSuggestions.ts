@@ -6,7 +6,6 @@ import {
 	type MentionContext,
 } from "../utils/mention-parser";
 import type { SlashCommand } from "../types/session";
-import type AgentClientPlugin from "../plugin";
 
 // ============================================================================
 // Types
@@ -83,12 +82,10 @@ export interface UseSuggestionsReturn {
  * - Auto-mention toggle coordination (slash commands disable auto-mention)
  *
  * @param vaultAccess - Vault access for note searching
- * @param plugin - Plugin instance for settings and configuration
  * @param availableCommands - Available slash commands from the agent session
  */
 export function useSuggestions(
 	vaultAccess: IVaultAccess,
-	plugin: AgentClientPlugin,
 	availableCommands: SlashCommand[],
 	autoMentionDefault: boolean,
 	pinnedActiveNote?: NoteMetadata | null,
@@ -162,7 +159,7 @@ export function useSuggestions(
 			setMentionSelectedIndex(0);
 			setMentionContext(ctx);
 		},
-		[vaultAccess, plugin],
+		[vaultAccess],
 	);
 
 	const mentionSelectSuggestion = useCallback(

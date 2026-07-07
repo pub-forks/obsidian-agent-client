@@ -86,8 +86,6 @@ export interface UseSessionHistoryOptions {
 	session: ChatSession;
 	/** Settings access for local session storage */
 	settingsAccess: ISettingsAccess;
-	/** Vault root path — used for session list filtering */
-	cwd: string;
 	/** Agent working directory — used for saving new session metadata */
 	agentCwd: string;
 	/** Callback invoked when a session is loaded/resumed/forked */

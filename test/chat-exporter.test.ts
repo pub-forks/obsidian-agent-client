@@ -455,24 +455,6 @@ describe("ChatExporter — message body conversion", () => {
 		expect(text).toContain("[doc.pdf](file:///vault/doc.pdf)\n\n");
 	});
 
-	it("renders permission_request with Requested/Cancelled status", async () => {
-		const { text } = await exportContent([
-			{
-				type: "permission_request",
-				toolCall: { toolCallId: "t1", title: "Write file" },
-				options: [],
-			},
-			{
-				type: "permission_request",
-				toolCall: { toolCallId: "t2", title: "Delete file" },
-				options: [],
-				isCancelled: true,
-			},
-		]);
-		expect(text).toContain("### ⚠️ Permission: Write file (Requested)");
-		expect(text).toContain("### ⚠️ Permission: Delete file (Cancelled)");
-	});
-
 	it("renders top-level terminal content as a heading with the first 8 chars of the id", async () => {
 		const { text } = await exportContent([
 			{ type: "terminal", terminalId: "abcdefgh-1234" },

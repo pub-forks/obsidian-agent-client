@@ -788,10 +788,9 @@ describe("sendPreparedPrompt", () => {
 		expect(authenticate).toHaveBeenCalledWith("api-key");
 		expect(sendPrompt).toHaveBeenCalledTimes(2);
 		expect(result.success).toBe(true);
-		expect(result.retriedSuccessfully).toBe(true);
 	});
 
-	test("-32000 with multiple auth methods returns requiresAuth without authenticating", async () => {
+	test("-32000 with multiple auth methods returns an error without authenticating", async () => {
 		const sendPrompt = vi.fn().mockRejectedValue(AUTH_ERROR);
 		const authenticate = vi.fn(async () => true);
 		const { client } = makeClient({ sendPrompt, authenticate });
@@ -803,11 +802,10 @@ describe("sendPreparedPrompt", () => {
 
 		expect(authenticate).not.toHaveBeenCalled();
 		expect(result.success).toBe(false);
-		expect(result.requiresAuth).toBe(true);
 		expect(result.error?.code).toBe(-32000);
 	});
 
-	test("-32000 with single method but authenticate() false falls back to requiresAuth", async () => {
+	test("-32000 with single method but authenticate() false falls back to an error result", async () => {
 		const sendPrompt = vi.fn().mockRejectedValue(AUTH_ERROR);
 		const authenticate = vi.fn(async () => false);
 		const { client } = makeClient({ sendPrompt, authenticate });
@@ -820,10 +818,10 @@ describe("sendPreparedPrompt", () => {
 		expect(authenticate).toHaveBeenCalledWith("api-key");
 		expect(sendPrompt).toHaveBeenCalledTimes(1); // no retry after failed auth
 		expect(result.success).toBe(false);
-		expect(result.requiresAuth).toBe(true);
+		expect(result.error?.code).toBe(-32000);
 	});
 
-	test("-32000 retry send failure returns a plain error result (no requiresAuth)", async () => {
+	test("-32000 retry send failure returns a plain error result", async () => {
 		const retryError = { code: -32603, message: "retry failed" };
 		const sendPrompt = vi
 			.fn()
@@ -838,11 +836,10 @@ describe("sendPreparedPrompt", () => {
 		);
 
 		expect(result.success).toBe(false);
-		expect(result.requiresAuth).toBeUndefined();
 		expect(result.error?.message).toBe("retry failed");
 	});
 
-	test("-32000 with no auth methods returns a plain error (no requiresAuth)", async () => {
+	test("-32000 with no auth methods returns a plain error", async () => {
 		const sendPrompt = vi.fn().mockRejectedValue(AUTH_ERROR);
 		const authenticate = vi.fn(async () => true);
 		const { client } = makeClient({ sendPrompt, authenticate });
@@ -851,7 +848,6 @@ describe("sendPreparedPrompt", () => {
 
 		expect(authenticate).not.toHaveBeenCalled();
 		expect(result.success).toBe(false);
-		expect(result.requiresAuth).toBeUndefined();
 		expect(result.error?.code).toBe(-32000);
 	});
 
@@ -866,7 +862,6 @@ describe("sendPreparedPrompt", () => {
 		const result = await sendPreparedPrompt(sendInput(), client);
 
 		expect(result.success).toBe(false);
-		expect(result.requiresAuth).toBeUndefined();
 		expect(result.error?.code).toBe(-32603);
 		expect(result.error?.message).toBe("detailed reason");
 		expect(result.error?.title).toBe("Internal Error");
