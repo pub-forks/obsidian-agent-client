@@ -94,8 +94,9 @@ export default defineConfig([
 			],
 		},
 	},
-	// acp/ must not import React. Its ../plugin imports are type-only today and
-	// will be banned entirely once AcpClientHost lands (refactor phase 2, PR2.1).
+	// acp/ must not import React, and must not import the plugin at all
+	// (type imports included) — it talks to its host via AcpClientHost
+	// (src/acp/host.ts) instead.
 	{
 		files: ["src/acp/**/*.ts"],
 		rules: {
@@ -110,9 +111,8 @@ export default defineConfig([
 						},
 						{
 							group: ["../plugin", "**/plugin"],
-							allowTypeImports: true,
 							message:
-								"acp/ may only type-import the plugin until AcpClientHost lands (phase 2).",
+								"acp/ must not depend on the plugin — use AcpClientHost (src/acp/host.ts).",
 						},
 					],
 				},
