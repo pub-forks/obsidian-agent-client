@@ -23,6 +23,7 @@ import type {
 	LineRange,
 } from "../utils/wikilink-resolver";
 import { getNoteWikiLinks } from "./wikilink-service";
+import { getCm6EditorView } from "./obsidian-internals";
 
 // ============================================================================
 // Port Types (from vault-access.port.ts)
@@ -415,12 +416,11 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			}
 		};
 
-		// Access CodeMirror 6 instance from Obsidian's Editor
-		// WARNING: This uses Obsidian's internal API (editor.cm) which is not documented
-		// and may change or be removed in future versions.
-		// This is required for real-time selection change tracking via EditorView.updateListener.
-		// If this API becomes unavailable, selection tracking will silently fail.
-		const cm = (editor as unknown as { cm?: EditorView }).cm;
+		// Real-time selection change tracking needs the CodeMirror 6
+		// EditorView behind Obsidian's Editor (undocumented editor.cm —
+		// see services/obsidian-internals.ts). If it becomes unavailable,
+		// selection tracking silently degrades (debug log below).
+		const cm = getCm6EditorView(editor);
 		emitSelection();
 
 		if (!cm) {

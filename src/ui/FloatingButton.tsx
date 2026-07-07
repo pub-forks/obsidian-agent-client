@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { setIcon } from "obsidian";
 import type AgentClientPlugin from "../plugin";
 import { useSettings } from "../hooks/useSettings";
+import { getAdapterResourcePath } from "../services/obsidian-internals";
 function clampPosition(
 	x: number,
 	y: number,
@@ -15,10 +16,6 @@ function clampPosition(
 		x: Math.max(0, Math.min(x, window.innerWidth - width)),
 		y: Math.max(0, Math.min(y, window.innerHeight - height)),
 	};
-}
-
-interface VaultAdapterWithResourcePath {
-	getResourcePath?: (path: string) => string;
 }
 
 // ============================================================
@@ -99,9 +96,7 @@ function FloatingButtonComponent({ plugin }: FloatingButtonProps) {
 		) {
 			return img;
 		}
-		return (
-			plugin.app.vault.adapter as VaultAdapterWithResourcePath
-		).getResourcePath?.(img);
+		return getAdapterResourcePath(plugin.app.vault.adapter, img);
 	}, [settings.floatingButtonImage, plugin.app.vault.adapter]);
 
 	// Build display labels with duplicate numbering

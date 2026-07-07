@@ -45,6 +45,7 @@ import { checkAgentUpdate } from "../services/update-checker";
 import type { SessionStatus } from "../services/view-registry";
 import { buildGeminiDeprecationNotice } from "../services/session-helpers";
 import { PRESET_AGENTS, GEMINI_PRESET_ID } from "../services/preset-agents";
+import { openPluginSettingsTab } from "../services/obsidian-internals";
 
 /** Stable empty array for useSuggestions when no commands available */
 const EMPTY_COMMANDS: SlashCommand[] = [];
@@ -120,14 +121,6 @@ export interface ChatPanelProps {
 // ============================================================================
 // State Definitions
 // ============================================================================
-
-// Type definitions for Obsidian internal APIs (sidebar menu)
-interface AppWithSettings {
-	setting: {
-		open: () => void;
-		openTabById: (id: string) => void;
-	};
-}
 
 // ============================================================================
 // ChatPanel Component
@@ -471,9 +464,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// Sidebar-specific: Header Menu (Obsidian native Menu API)
 	// ============================================================
 	const handleOpenSettings = useCallback(() => {
-		const appWithSettings = plugin.app as unknown as AppWithSettings;
-		appWithSettings.setting.open();
-		appWithSettings.setting.openTabById(plugin.manifest.id);
+		openPluginSettingsTab(plugin.app, plugin.manifest.id);
 	}, [plugin]);
 
 	const handleNewChatInDirectory = useCallback(

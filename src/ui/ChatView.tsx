@@ -22,6 +22,10 @@ import { ChatPanel, type ChatPanelCallbacks } from "./ChatPanel";
 
 // Service imports
 import { VaultService } from "../services/vault-service";
+import {
+	getStableLeafId,
+	updateLeafHeader,
+} from "../services/obsidian-internals";
 
 export const VIEW_TYPE_CHAT = "agent-client-chat-view";
 
@@ -126,7 +130,7 @@ export class ChatView extends ItemView implements IChatViewContainer {
 		// Static sidebar view (not navigable) — hides .view-header
 		this.navigation = false;
 		// Use leaf.id if available, otherwise generate UUID
-		this.viewId = (leaf as { id?: string }).id ?? crypto.randomUUID();
+		this.viewId = getStableLeafId(leaf) ?? crypto.randomUUID();
 	}
 
 	getViewType() {
@@ -233,9 +237,7 @@ export class ChatView extends ItemView implements IChatViewContainer {
 	}
 
 	refreshDisplayText(): void {
-		// Undocumented WorkspaceLeaf.updateHeader() — Obsidian core uses the same internal method to refresh tab headers.
-		const leaf = this.leaf as unknown as { updateHeader?: () => void };
-		leaf.updateHeader?.();
+		updateLeafHeader(this.leaf);
 	}
 
 	/**

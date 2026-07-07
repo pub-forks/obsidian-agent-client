@@ -21,6 +21,7 @@ import { getLogger } from "../utils/logger";
 import type { ErrorInfo } from "../types/errors";
 import type { AgentUpdateNotification } from "../services/update-checker";
 import { useSettings } from "../hooks/useSettings";
+import { getObsidianSpellcheck } from "../services/obsidian-internals";
 
 // ============================================================================
 // Image Constants
@@ -301,10 +302,8 @@ export function InputArea({
 	const settings = useSettings(plugin);
 	const showEmojis = plugin.settings.displaySettings.showEmojis;
 
-	// Unofficial Obsidian API (see src/types/obsidian-internals.d.ts)
-	const obsidianSpellcheck =
-		(plugin.app.vault.getConfig("spellcheck") as boolean | undefined) ??
-		true;
+	// Unofficial Obsidian API (see src/services/obsidian-internals.ts)
+	const obsidianSpellcheck = getObsidianSpellcheck(plugin.app);
 
 	// Local state (hint and command are still local - not needed for broadcast)
 	const [hintText, setHintText] = useState<string | null>(null);
