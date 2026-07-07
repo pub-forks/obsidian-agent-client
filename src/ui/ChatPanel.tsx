@@ -377,7 +377,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// ============================================================
 	// Chat Actions
 	// ============================================================
-	const actions = useChatActions(
+	const actions = useChatActions({
 		plugin,
 		agent,
 		sessionHistory,
@@ -386,8 +386,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 		messages,
 		settings,
 		vaultPath,
-		embeddedConfig?.persist ? embeddedConfig.id : undefined,
-	);
+		persistentEmbedId: embeddedConfig?.persist
+			? embeddedConfig.id
+			: undefined,
+	});
 
 	const {
 		handleSendMessage,

@@ -64,23 +64,43 @@ export interface UseChatActionsReturn {
 	) => Promise<void>;
 }
 
+/**
+ * Options for the useChatActions hook.
+ */
+export interface UseChatActionsOptions {
+	plugin: AgentClientPlugin;
+	agent: UseAgentReturn;
+	sessionHistory: UseSessionHistoryReturn;
+	suggestions: UseSuggestionsReturn;
+	session: ChatSession;
+	messages: ChatMessage[];
+	/**
+	 * Only windowsWslMode is read reactively here; exportSettings are read
+	 * live from plugin.settings. Narrow so ChatPanel can pass a settings slice.
+	 */
+	settings: Pick<AgentClientPluginSettings, "windowsWslMode">;
+	vaultPath: string;
+	persistentEmbedId?: string;
+}
+
 // ============================================================================
 // Hook Implementation
 // ============================================================================
 
 export function useChatActions(
-	plugin: AgentClientPlugin,
-	agent: UseAgentReturn,
-	sessionHistory: UseSessionHistoryReturn,
-	suggestions: UseSuggestionsReturn,
-	session: ChatSession,
-	messages: ChatMessage[],
-	// Only windowsWslMode is read reactively here; exportSettings are read
-	// live from plugin.settings. Narrow so ChatPanel can pass a settings slice.
-	settings: Pick<AgentClientPluginSettings, "windowsWslMode">,
-	vaultPath: string,
-	persistentEmbedId?: string,
+	options: UseChatActionsOptions,
 ): UseChatActionsReturn {
+	const {
+		plugin,
+		agent,
+		sessionHistory,
+		suggestions,
+		session,
+		messages,
+		settings,
+		vaultPath,
+		persistentEmbedId,
+	} = options;
 	const logger = getLogger();
 
 	// ============================================================
