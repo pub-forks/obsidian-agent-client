@@ -16,7 +16,7 @@ import { TerminalManager } from "./terminal-handler";
 import { PermissionManager } from "./permission-handler";
 import { AcpHandler } from "./acp-handler";
 import { getLogger, Logger } from "../utils/logger";
-import type AgentClientPlugin from "../plugin";
+import type { AcpClientHost } from "./host";
 import {
 	convertWindowsPathToWsl,
 	getEnhancedWindowsEnv,
@@ -94,11 +94,11 @@ export class AcpClient {
 
 	private logger: Logger;
 
-	constructor(private plugin: AgentClientPlugin) {
+	constructor(private host: AcpClientHost) {
 		this.logger = getLogger();
 
 		// Initialize managers
-		this.terminalManager = new TerminalManager(plugin);
+		this.terminalManager = new TerminalManager(host);
 		this.permissionManager = new PermissionManager(
 			{
 				onSessionUpdate: (update) =>
@@ -145,7 +145,7 @@ export class AcpClient {
 
 		// Update auto-allow permissions from plugin settings
 		this.permissionManager.setAutoAllow(
-			this.plugin.settings.autoAllowPermissions,
+			this.host.getSettings().autoAllowPermissions,
 		);
 
 		// Validate command
@@ -176,13 +176,13 @@ export class AcpClient {
 		// On Windows, enhance PATH with full system/user PATH from registry.
 		// Electron apps launched from shortcuts don't inherit the full PATH,
 		// which causes executables like python, node, etc. to not be found.
-		if (Platform.isWin && !this.plugin.settings.windowsWslMode) {
+		if (Platform.isWin && !this.host.getSettings().windowsWslMode) {
 			baseEnv = getEnhancedWindowsEnv(baseEnv);
 		}
 
 		// Add Node.js directory to PATH only when nodePath is an explicit absolute path.
 		// When nodePath is empty or a bare command name, the login shell handles it.
-		const nodeDir = resolveNodeDirectory(this.plugin.settings.nodePath);
+		const nodeDir = resolveNodeDirectory(this.host.getSettings().nodePath);
 		if (nodeDir) {
 			const separator = Platform.isWin ? ";" : ":";
 			baseEnv.PATH = baseEnv.PATH
@@ -199,9 +199,7 @@ export class AcpClient {
 		// Skip empty values (e.g. the secret was deleted from the Keychain):
 		// exporting ANTHROPIC_API_KEY="" etc. can break account-based logins.
 		if (config.apiKey) {
-			const secretValue = this.plugin.app.secretStorage.getSecret(
-				config.apiKey.secretId,
-			);
+			const secretValue = this.host.getSecret(config.apiKey.secretId);
 			if (secretValue) {
 				baseEnv[config.apiKey.envVarName] = secretValue;
 			}
@@ -213,7 +211,7 @@ export class AcpClient {
 		// agents resolve the API key into baseEnv above — not into config.env —
 		// so its var name must be added explicitly, or the key would never cross
 		// into WSL. Must run AFTER the secret is injected into baseEnv. (#312)
-		if (Platform.isWin && this.plugin.settings.windowsWslMode) {
+		if (Platform.isWin && this.host.getSettings().windowsWslMode) {
 			const wslEnvNames = Object.keys(config.env || {});
 			if (config.apiKey?.envVarName) {
 				wslEnvNames.push(config.apiKey.envVarName);
@@ -232,8 +230,8 @@ export class AcpClient {
 			args,
 			config.workingDirectory,
 			{
-				wslMode: this.plugin.settings.windowsWslMode,
-				wslDistribution: this.plugin.settings.windowsWslDistribution,
+				wslMode: this.host.getSettings().windowsWslMode,
+				wslDistribution: this.host.getSettings().windowsWslDistribution,
 				nodeDir,
 				alwaysEscape: true,
 			},
@@ -287,7 +285,7 @@ export class AcpClient {
 					error,
 					command,
 					agentLabel,
-					this.plugin.settings.windowsWslMode,
+					this.host.getSettings().windowsWslMode,
 				),
 			};
 
@@ -317,7 +315,7 @@ export class AcpClient {
 					message: `The command "${command}" could not be found. Please check the path configuration for ${agentLabel}.`,
 					suggestion: getCommandNotFoundSuggestion(
 						command,
-						this.plugin.settings.windowsWslMode,
+						this.host.getSettings().windowsWslMode,
 					),
 				};
 
@@ -433,7 +431,7 @@ export class AcpClient {
 					clientInfo: {
 						name: "obsidian-agent-client",
 						title: "Agent Client for Obsidian",
-						version: this.plugin.manifest.version,
+						version: this.host.clientVersion,
 					},
 				},
 			);
@@ -818,7 +816,7 @@ export class AcpClient {
 	 * Convert working directory to WSL path if in WSL mode on Windows.
 	 */
 	private toSessionCwd(cwd: string): string {
-		if (Platform.isWin && this.plugin.settings.windowsWslMode) {
+		if (Platform.isWin && this.host.getSettings().windowsWslMode) {
 			return convertWindowsPathToWsl(cwd);
 		}
 		return cwd;

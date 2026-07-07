@@ -1,5 +1,5 @@
 import { spawn, ChildProcess, SpawnOptions } from "child_process";
-import type AgentClientPlugin from "../plugin";
+import type { AcpClientHost } from "./host";
 import { getLogger, Logger } from "../utils/logger";
 import { Platform } from "obsidian";
 import { resolveNodeDirectory } from "../utils/paths";
@@ -43,11 +43,11 @@ interface TerminalProcess {
 export class TerminalManager {
 	private terminals = new Map<string, TerminalProcess>();
 	private logger: Logger;
-	private plugin: AgentClientPlugin;
+	private host: AcpClientHost;
 
-	constructor(plugin: AgentClientPlugin) {
+	constructor(host: AcpClientHost) {
 		this.logger = getLogger();
-		this.plugin = plugin;
+		this.host = host;
 	}
 
 	createTerminal(params: CreateTerminalParams): string {
@@ -64,7 +64,7 @@ export class TerminalManager {
 
 		// On Windows (non-WSL mode), enhance PATH with full system/user PATH from registry.
 		// Electron apps launched from shortcuts don't inherit the full PATH.
-		if (Platform.isWin && !this.plugin.settings.windowsWslMode) {
+		if (Platform.isWin && !this.host.getSettings().windowsWslMode) {
 			env = getEnhancedWindowsEnv(env);
 		}
 
@@ -76,7 +76,11 @@ export class TerminalManager {
 
 		// In WSL mode, forward the tool-provided env vars into WSL via WSLENV
 		// (Windows env is otherwise not visible to the Linux process).
-		if (Platform.isWin && this.plugin.settings.windowsWslMode && params.env) {
+		if (
+			Platform.isWin &&
+			this.host.getSettings().windowsWslMode &&
+			params.env
+		) {
 			env = buildWslEnv(
 				env,
 				params.env.map((e) => e.name),
@@ -88,14 +92,14 @@ export class TerminalManager {
 		let args = params.args || [];
 
 		// Platform-specific shell wrapping
-		const nodeDir = resolveNodeDirectory(this.plugin.settings.nodePath);
+		const nodeDir = resolveNodeDirectory(this.host.getSettings().nodePath);
 		const prepared = prepareShellCommand(
 			command,
 			args,
 			params.cwd || process.cwd(),
 			{
-				wslMode: this.plugin.settings.windowsWslMode,
-				wslDistribution: this.plugin.settings.windowsWslDistribution,
+				wslMode: this.host.getSettings().windowsWslMode,
+				wslDistribution: this.host.getSettings().windowsWslDistribution,
 				nodeDir,
 				alwaysEscape: false,
 			},
@@ -114,7 +118,7 @@ export class TerminalManager {
 		// In WSL mode the working directory is applied inside the launcher
 		// (cd '<wslCwd>'); the wsl.exe process must NOT receive a Linux path as
 		// its Windows cwd (CreateProcess would fail), so omit cwd there.
-		const useWsl = Platform.isWin && this.plugin.settings.windowsWslMode;
+		const useWsl = Platform.isWin && this.host.getSettings().windowsWslMode;
 		const spawnOptions: SpawnOptions = {
 			cwd: useWsl ? undefined : params.cwd || undefined,
 			env,

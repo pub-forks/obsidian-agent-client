@@ -31,6 +31,7 @@ import {
 } from "./services/settings-service";
 import { AgentClientSettingTab } from "./ui/SettingsTab";
 import { AcpClient } from "./acp/acp-client";
+import type { AcpClientHost } from "./acp/host";
 import {
 	normalizeCustomAgent,
 	ensureUniqueCustomAgentIds,
@@ -490,13 +491,30 @@ export default class AgentClientPlugin extends Plugin {
 	}
 
 	/**
+	 * Build the narrow host surface the ACP layer is allowed to see.
+	 * getSettings() reads live settings on every call — do not cache.
+	 */
+	private createAcpHost(): AcpClientHost {
+		return {
+			getSettings: () => ({
+				autoAllowPermissions: this.settings.autoAllowPermissions,
+				nodePath: this.settings.nodePath,
+				windowsWslMode: this.settings.windowsWslMode,
+				windowsWslDistribution: this.settings.windowsWslDistribution,
+			}),
+			getSecret: (id) => this.app.secretStorage.getSecret(id),
+			clientVersion: this.manifest.version,
+		};
+	}
+
+	/**
 	 * Get or create an AcpClient for a specific view.
 	 * Each ChatView has its own AcpClient for independent sessions.
 	 */
 	getOrCreateAcpClient(viewId: string): AcpClient {
 		let client = this._acpClients.get(viewId);
 		if (!client) {
-			client = new AcpClient(this);
+			client = new AcpClient(this.createAcpHost());
 			this._acpClients.set(viewId, client);
 		}
 		return client;
