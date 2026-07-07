@@ -21,8 +21,8 @@ import {
 	convertWindowsPathToWsl,
 	getEnhancedWindowsEnv,
 	prepareShellCommand,
-	buildWslEnv,
 } from "../utils/platform";
+import { buildSpawnEnv } from "./spawn-env";
 import { resolveNodeDirectory } from "../utils/paths";
 import {
 	extractStderrErrorHint,
@@ -167,56 +167,30 @@ export class AcpClient {
 			args.length > 0 ? args.join(" ") : "(none)",
 		);
 
-		// Prepare environment variables
-		let baseEnv: NodeJS.ProcessEnv = {
-			...process.env,
-			...(config.env || {}),
-		};
-
-		// On Windows, enhance PATH with full system/user PATH from registry.
-		// Electron apps launched from shortcuts don't inherit the full PATH,
-		// which causes executables like python, node, etc. to not be found.
-		if (Platform.isWin && !this.host.getSettings().windowsWslMode) {
-			baseEnv = getEnhancedWindowsEnv(baseEnv);
-		}
-
-		// Add Node.js directory to PATH only when nodePath is an explicit absolute path.
-		// When nodePath is empty or a bare command name, the login shell handles it.
+		// Resolve API key secret just before spawn so the latest value is used.
+		// Custom agents don't set config.apiKey and inject keys via env directly.
 		const nodeDir = resolveNodeDirectory(this.host.getSettings().nodePath);
+		const baseEnv = buildSpawnEnv({
+			baseEnv: process.env,
+			configEnv: config.env,
+			isWin: Platform.isWin,
+			wslMode: this.host.getSettings().windowsWslMode,
+			nodeDir,
+			apiKey: config.apiKey
+				? {
+						envVarName: config.apiKey.envVarName,
+						secretValue: this.host.getSecret(
+							config.apiKey.secretId,
+						),
+					}
+				: undefined,
+			enhanceWindowsEnv: getEnhancedWindowsEnv,
+		});
 		if (nodeDir) {
-			const separator = Platform.isWin ? ";" : ":";
-			baseEnv.PATH = baseEnv.PATH
-				? `${nodeDir}${separator}${baseEnv.PATH}`
-				: nodeDir;
 			this.logger.log(
 				"[AcpClient] Node.js directory added to PATH:",
 				nodeDir,
 			);
-		}
-
-		// Resolve API key secret just before spawn so the latest value is used.
-		// Custom agents don't set config.apiKey and inject keys via env directly.
-		// Skip empty values (e.g. the secret was deleted from the Keychain):
-		// exporting ANTHROPIC_API_KEY="" etc. can break account-based logins.
-		if (config.apiKey) {
-			const secretValue = this.host.getSecret(config.apiKey.secretId);
-			if (secretValue) {
-				baseEnv[config.apiKey.envVarName] = secretValue;
-			}
-		}
-
-		// In WSL mode, forward the configured env var NAMES into WSL via WSLENV
-		// (Windows env vars are otherwise invisible to the Linux agent process,
-		// so the plugin's API key field would have no effect in WSL). Preset
-		// agents resolve the API key into baseEnv above — not into config.env —
-		// so its var name must be added explicitly, or the key would never cross
-		// into WSL. Must run AFTER the secret is injected into baseEnv. (#312)
-		if (Platform.isWin && this.host.getSettings().windowsWslMode) {
-			const wslEnvNames = Object.keys(config.env || {});
-			if (config.apiKey?.envVarName) {
-				wslEnvNames.push(config.apiKey.envVarName);
-			}
-			baseEnv = buildWslEnv(baseEnv, wslEnvNames);
 		}
 
 		this.logger.log(
