@@ -1,9 +1,13 @@
 /**
- * Agent Update Checker
+ * Update Checker
  *
  * Checks preset agent ACP adapters for:
  * 1. Package migration — deprecated packages that have been renamed
  * 2. Version updates — newer versions available on npm
+ *
+ * Also checks the plugin itself for newer GitHub releases
+ * (checkPluginUpdate — fetch + semver comparison only; the caller owns the
+ * user-facing Notice).
  *
  * Pure functions (non-React). Uses Obsidian's requestUrl for network access.
  */
@@ -112,6 +116,51 @@ export async function checkAgentUpdate(agentInfo: {
 	return null;
 }
 
+/**
+ * Check for plugin updates against GitHub releases.
+ * - Stable version users: compare with latest stable release
+ * - Prerelease users: compare with both latest stable and latest prerelease
+ *
+ * No Notice here — the caller (plugin.checkForUpdates) owns user-facing
+ * notification.
+ *
+ * @param currentVersion - The running plugin version (manifest.version).
+ * @returns The newer version string (stable preferred when both are newer),
+ * or null when already up to date.
+ */
+export async function checkPluginUpdate(
+	currentVersion: string,
+): Promise<string | null> {
+	const current = semver.clean(currentVersion) || currentVersion;
+	const isCurrentPrerelease = semver.prerelease(current) !== null;
+
+	if (isCurrentPrerelease) {
+		// Prerelease user: check both stable and prerelease
+		const [latestStable, latestPrerelease] = await Promise.all([
+			fetchLatestStable(),
+			fetchLatestPrerelease(),
+		]);
+
+		const hasNewerStable =
+			latestStable && semver.gt(latestStable, current);
+		const hasNewerPrerelease =
+			latestPrerelease && semver.gt(latestPrerelease, current);
+
+		if (hasNewerStable || hasNewerPrerelease) {
+			// Prefer stable version notification if available
+			return hasNewerStable ? latestStable : latestPrerelease;
+		}
+	} else {
+		// Stable version user: check stable only
+		const latestStable = await fetchLatestStable();
+		if (latestStable && semver.gt(latestStable, current)) {
+			return latestStable;
+		}
+	}
+
+	return null;
+}
+
 // ============================================================================
 // Internal
 // ============================================================================
@@ -125,4 +174,34 @@ async function fetchLatestVersion(packageName: string): Promise<string | null> {
 	});
 	const data = response.json as { version?: string };
 	return data.version ? (semver.clean(data.version) ?? null) : null;
+}
+
+/**
+ * Fetch the latest stable release version from GitHub.
+ */
+async function fetchLatestStable(): Promise<string | null> {
+	const response = await requestUrl({
+		url: "https://api.github.com/repos/RAIT-09/obsidian-agent-client/releases/latest",
+	});
+	const data = response.json as { tag_name?: string };
+	return data.tag_name ? semver.clean(data.tag_name) : null;
+}
+
+/**
+ * Fetch the latest prerelease version from GitHub.
+ */
+async function fetchLatestPrerelease(): Promise<string | null> {
+	const response = await requestUrl({
+		url: "https://api.github.com/repos/RAIT-09/obsidian-agent-client/releases",
+	});
+	const releases = response.json as Array<{
+		tag_name: string;
+		prerelease: boolean;
+	}>;
+
+	// Find the first prerelease (releases are sorted by date descending)
+	const latestPrerelease = releases.find((r) => r.prerelease);
+	return latestPrerelease
+		? semver.clean(latestPrerelease.tag_name)
+		: null;
 }
