@@ -1,23 +1,19 @@
 import * as React from "react";
 const { useState, useRef, useEffect, useMemo, useCallback } = React;
-import {
-	Notice,
-	FileSystemAdapter,
-	Platform,
-	Menu,
-	setIcon,
-	TFile,
-	type MenuItem,
-} from "obsidian";
+import { FileSystemAdapter, Platform, setIcon, TFile } from "obsidian";
 
-import type { AttachedFile, ChatInputState, ChatMessage } from "../types/chat";
+import type { AttachedFile, ChatInputState } from "../types/chat";
 import type { NoteMetadata } from "../services/vault-service";
 import { isSameDirectory } from "../utils/platform";
 import { computeSessionTitle } from "../services/session-helpers";
 import { useHistoryModal } from "../hooks/useHistoryModal";
 import { useChatActions } from "../hooks/useChatActions";
-import { ChangeDirectoryModal } from "./ChangeDirectoryModal";
-import { addRenameSessionMenuItem } from "./EditTitleModal";
+import {
+	buildSidebarMenu,
+	buildFloatingMenu,
+	type SidebarMenuDeps,
+	type FloatingMenuDeps,
+} from "./chat-menus";
 
 // Service imports
 import { getLogger } from "../utils/logger";
@@ -33,6 +29,12 @@ import { useSettingsSelector } from "../hooks/useSettings";
 import { useSuggestions } from "../hooks/useSuggestions";
 import { useAgent } from "../hooks/useAgent";
 import { useSessionHistory } from "../hooks/useSessionHistory";
+import { useMessagePersistence } from "../hooks/useMessagePersistence";
+import { usePersistRestore } from "../hooks/usePersistRestore";
+import { useWorkspaceHotkeys } from "../hooks/useWorkspaceHotkeys";
+import { usePendingPrompt } from "../hooks/usePendingPrompt";
+import { useFocusTracking } from "../hooks/useFocusTracking";
+import { useViewRegistryNotifier } from "../hooks/useViewRegistryNotifier";
 
 // Domain model imports
 import {
@@ -125,9 +127,6 @@ export interface ChatPanelProps {
 // ============================================================================
 // ChatPanel Component
 // ============================================================================
-
-/** Debounce (ms) for re-saving when trailing chunks arrive after a turn ends (#320). */
-const TRAILING_SAVE_DEBOUNCE_MS = 800;
 
 // Settings slice actually consumed by ChatPanel. Subscribing to just these
 // fields (rather than the whole settings object) prevents a re-render on every
@@ -321,13 +320,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// Input state (for broadcast commands)
 	const [inputValue, setInputValue] = useState("");
 	const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+	// Stable identity ([] deps): captured once by the pending-prompt handler.
+	const clearAttachments = useCallback(() => setAttachedFiles([]), []);
 
-	// Pending auto-send queued by the pending-prompt handler (drained when ready)
-	const [pendingAutoSend, setPendingAutoSend] = useState<string | null>(null);
-	const persistRestoreAttemptedRef = useRef(false);
-	// Tracks whether we've already re-spawned the agent to match a saved
-	// conversation before restoring it (prevents a restart loop).
-	const persistRestartedRef = useRef(false);
 	// Gate the mount-init session-creation effect: run on first mount, then
 	// re-run ONLY when the resolved agent identity actually changes (e.g. the
 	// sidebar's onAgentIdRestored late-applies a persisted agent). A bare
@@ -519,91 +514,23 @@ export const ChatPanel = React.memo(function ChatPanel({
 		],
 	);
 
-	const handleShowSidebarMenu = useCallback(
-		(e: React.MouseEvent<HTMLDivElement>) => {
-			const menu = new Menu();
-
-			// -- Switch agent section --
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Switch agent").setIsLabel(true);
-			});
-
-			for (const agent of availableAgents) {
-				menu.addItem((item: MenuItem) => {
-					item.setTitle(agent.displayName)
-						.setChecked(agent.id === (session.agentId || ""))
-						.onClick(() => {
-							void handleNewChatWithPersist(agent.id);
-						});
-				});
-			}
-
-			menu.addSeparator();
-
-			// -- Actions section --
-			addRenameSessionMenuItem(
-				menu,
-				plugin,
-				session.sessionId,
-				plugin.settingsService
-					.getSavedSessions()
-					.find((s) => s.sessionId === session.sessionId)?.title ??
-					"New session",
-			);
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Open new view")
-					.setIcon("copy-plus")
-					.onClick(() => {
-						void plugin.openNewChatViewWithAgent(
-							plugin.settings.defaultAgentId,
-						);
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Restart agent")
-					.setIcon("refresh-cw")
-					.onClick(() => {
-						void handleRestartAgent();
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("New chat in directory...")
-					.setIcon("folder-open")
-					.onClick(() => {
-						const modal = new ChangeDirectoryModal(
-							plugin.app,
-							agentCwd,
-							(directory) => {
-								void handleNewChatInDirectory(directory);
-							},
-						);
-						modal.open();
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Open session manager")
-					.setIcon("layout-list")
-					.onClick(() => {
-						void plugin.activateSessionManager();
-					});
-			});
-
-			menu.addSeparator();
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Plugin settings")
-					.setIcon("settings")
-					.onClick(() => {
-						handleOpenSettings();
-					});
-			});
-
-			menu.showAtMouseEvent(e.nativeEvent);
-		},
+	// Menu deps bundles (useMemo-stabilized — INV-13; they feed useCallback
+	// deps). The deps arrays are kept verbatim from the pre-extraction
+	// handleShow*Menu useCallbacks: session.sessionId is intentionally NOT
+	// listed (the old closures read it with exactly this staleness), and the
+	// floating bundle likewise omits plugin (stable service instance).
+	const sidebarMenuDeps = useMemo<SidebarMenuDeps>(
+		() => ({
+			plugin,
+			sessionId: session.sessionId,
+			agentCwd,
+			handleRestartAgent,
+			handleNewChatInDirectory,
+			handleOpenSettings,
+			availableAgents,
+			currentAgentId: session.agentId,
+			handleNewChatWithPersist,
+		}),
 		[
 			availableAgents,
 			session.agentId,
@@ -616,99 +543,26 @@ export const ChatPanel = React.memo(function ChatPanel({
 		],
 	);
 
-	const handleShowFloatingMenu = useCallback(
-		(e: React.MouseEvent<HTMLElement>) => {
-			const menu = new Menu();
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("New chat")
-					.setIcon("plus")
-					.onClick(() => {
-						void handleNewChat();
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Session history")
-					.setIcon("history")
-					.onClick(() => {
-						void handleOpenHistory();
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Export chat to Markdown")
-					.setIcon("save")
-					.onClick(() => {
-						void handleExportChat();
-					});
-			});
-
-			menu.addSeparator();
-
-			addRenameSessionMenuItem(
-				menu,
-				plugin,
-				session.sessionId,
-				plugin.settingsService
-					.getSavedSessions()
-					.find((s) => s.sessionId === session.sessionId)?.title ??
-					"New session",
-			);
-
-			if (onOpenNewWindow) {
-				menu.addItem((item: MenuItem) => {
-					item.setTitle("Open new floating chat")
-						.setIcon("copy-plus")
-						.onClick(() => {
-							onOpenNewWindow();
-						});
-				});
-			}
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Restart agent")
-					.setIcon("refresh-cw")
-					.onClick(() => {
-						void handleRestartAgent();
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("New chat in directory...")
-					.setIcon("folder-open")
-					.onClick(() => {
-						const modal = new ChangeDirectoryModal(
-							plugin.app,
-							agentCwd,
-							(directory) => {
-								void handleNewChatInDirectory(directory);
-							},
-						);
-						modal.open();
-					});
-			});
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Open session manager")
-					.setIcon("layout-list")
-					.onClick(() => {
-						void plugin.activateSessionManager();
-					});
-			});
-
-			menu.addSeparator();
-
-			menu.addItem((item: MenuItem) => {
-				item.setTitle("Plugin settings")
-					.setIcon("settings")
-					.onClick(() => {
-						handleOpenSettings();
-					});
-			});
-
-			menu.showAtMouseEvent(e.nativeEvent);
+	const handleShowSidebarMenu = useCallback(
+		(e: React.MouseEvent<HTMLDivElement>) => {
+			buildSidebarMenu(sidebarMenuDeps).showAtMouseEvent(e.nativeEvent);
 		},
+		[sidebarMenuDeps],
+	);
+
+	const floatingMenuDeps = useMemo<FloatingMenuDeps>(
+		() => ({
+			plugin,
+			sessionId: session.sessionId,
+			agentCwd,
+			handleRestartAgent,
+			handleNewChatInDirectory,
+			handleOpenSettings,
+			handleNewChat,
+			handleOpenHistory,
+			handleExportChat,
+			onOpenNewWindow,
+		}),
 		[
 			handleNewChat,
 			handleOpenHistory,
@@ -719,6 +573,13 @@ export const ChatPanel = React.memo(function ChatPanel({
 			handleNewChatInDirectory,
 			handleOpenSettings,
 		],
+	);
+
+	const handleShowFloatingMenu = useCallback(
+		(e: React.MouseEvent<HTMLElement>) => {
+			buildFloatingMenu(floatingMenuDeps).showAtMouseEvent(e.nativeEvent);
+		},
+		[floatingMenuDeps],
 	);
 
 	// ============================================================
@@ -784,66 +645,30 @@ export const ChatPanel = React.memo(function ChatPanel({
 		void agent.createSession(resolvedAgent);
 	}, [agent.createSession, config?.agent, initialAgentId]);
 
-	useEffect(() => {
-		if (variant !== "embedded") return;
-		if (!embeddedConfig?.persist || !embeddedConfig.id) return;
-		if (!isSessionReady || !session.sessionId || !session.agentId) return;
-		if (persistRestoreAttemptedRef.current) return;
+	// Bound wrapper: getSavedSessionByEmbedId is a regular class method, so it
+	// must not be passed bare (this-binding). Keyed on the stable service
+	// instance — same re-run behavior as depending on plugin.settingsService.
+	const getSavedSessionByEmbedId = useCallback(
+		(embedId: string) =>
+			plugin.settingsService.getSavedSessionByEmbedId(embedId),
+		[plugin.settingsService],
+	);
 
-		// Resolve by the device-neutral embedId ALONE — not filtered by the
-		// current agent/cwd — so an unpinned block that switched agents, or one
-		// whose conversation lives under a custom "New chat in directory…" cwd,
-		// still finds its last session (#5, #11).
-		const savedSession = plugin.settingsService.getSavedSessionByEmbedId(
-			embeddedConfig.id,
-		);
-		if (!savedSession || savedSession.sessionId === session.sessionId) {
-			persistRestoreAttemptedRef.current = true;
-			return;
-		}
-
-		// restoreSession loads against the CURRENT agent process and cannot
-		// switch agents (loadSession/resumeSession run on the live connection).
-		// If the saved conversation used a different agent, re-spawn under it
-		// first (adopting its cwd), then let this effect re-run to perform the
-		// load. setAgentCwd is safe here because the mount-init effect is
-		// guarded to run once (hasInitializedRef).
-		if (
-			savedSession.agentId !== session.agentId &&
-			!persistRestartedRef.current
-		) {
-			persistRestartedRef.current = true;
-			setAgentCwd(savedSession.cwd);
-			void agent.restartSession(savedSession.agentId, savedSession.cwd);
-			return;
-		}
-
-		if (!sessionHistory.canRestore) {
-			persistRestoreAttemptedRef.current = true;
-			return;
-		}
-
-		persistRestoreAttemptedRef.current = true;
-		// Align agentCwd with the restored conversation so the cwd banner and
-		// later first-message saves reflect its real directory (restoreSession
-		// itself does not touch agentCwd). Safe under the mount-init guard.
-		setAgentCwd(savedSession.cwd);
-		void sessionHistory.restoreSession(
-			savedSession.sessionId,
-			savedSession.cwd,
-		);
-	}, [
-		variant,
-		embeddedConfig?.persist,
-		embeddedConfig?.id,
+	usePersistRestore({
+		enabled:
+			variant === "embedded" &&
+			!!embeddedConfig?.persist &&
+			!!embeddedConfig.id,
+		embedId: embeddedConfig?.id,
 		isSessionReady,
-		session.sessionId,
-		session.agentId,
-		sessionHistory.canRestore,
-		sessionHistory.restoreSession,
-		plugin.settingsService,
-		agent.restartSession,
-	]);
+		sessionId: session.sessionId,
+		currentAgentId: session.agentId,
+		canRestore: sessionHistory.canRestore,
+		getSavedSessionByEmbedId,
+		restoreSession: sessionHistory.restoreSession,
+		restartSession: agent.restartSession,
+		setAgentCwd,
+	});
 
 	// Apply configured model (a select config option with category "model")
 	// when session is ready.
@@ -884,49 +709,41 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const sessionRef = useRef(session);
 	const autoExportRef = useRef(autoExportIfEnabled);
 	const closeSessionRef = useRef(agent.closeSession);
-	const saveSessionMessagesRef = useRef(sessionHistory.saveSessionMessages);
-	// True once the user has actually run a turn in THIS session. The
-	// trailing-chunk re-save and close-time flush are armed only after a real
-	// turn, so messages that were merely loaded/replayed are never re-saved
-	// (which would bump updatedAt and corrupt "last used" ordering). (#320 review)
-	const sentThisSessionRef = useRef(false);
-	// Reference identity of the messages array last persisted to disk. Used to
-	// de-duplicate the turn-end save, the trailing-chunk re-save, and the
-	// close-time flush.
-	const lastSavedMessagesRef = useRef<ChatMessage[] | null>(null);
 	messagesRef.current = messages;
 	sessionRef.current = session;
 	autoExportRef.current = autoExportIfEnabled;
 	closeSessionRef.current = agent.closeSession;
-	saveSessionMessagesRef.current = sessionHistory.saveSessionMessages;
+
+	// ============================================================
+	// Effects - Save Session Messages (three-path persistence, #320)
+	// ============================================================
+	const { flushNow } = useMessagePersistence({
+		sessionId: session.sessionId,
+		messages,
+		isSending,
+		saveSessionMessages: sessionHistory.saveSessionMessages,
+		enableSystemNotifications: settings.enableSystemNotifications,
+		agentLabel: activeAgentLabel,
+	});
 
 	// Cleanup on unmount only - auto-export and close session
 	useEffect(() => {
 		return () => {
 			logger.log("[ChatPanel] Cleanup: auto-export and close session");
-			// Flush trailing-chunk content the debounced save may not have
-			// persisted yet (view closed within the debounce window). Only when a
-			// real turn ran this session and there is unsaved content. (#320 review)
-			const latest = messagesRef.current;
-			const sid = sessionRef.current.sessionId;
-			if (
-				sentThisSessionRef.current &&
-				sid &&
-				latest.length > 0 &&
-				lastSavedMessagesRef.current !== latest
-			) {
-				saveSessionMessagesRef.current(sid, latest);
-			}
+			// Flush unsaved trailing-chunk content first, then export, then
+			// close — the order is controlled explicitly here rather than via
+			// React's effect-cleanup ordering. (#320 review)
+			flushNow();
 			void (async () => {
 				await autoExportRef.current(
 					"closeChat",
-					latest,
+					messagesRef.current,
 					sessionRef.current,
 				);
 				await closeSessionRef.current();
 			})();
 		};
-	}, [logger]);
+	}, [logger, flushNow]);
 
 	// ============================================================
 	// Effects - Update Check
@@ -958,95 +775,17 @@ export const ChatPanel = React.memo(function ChatPanel({
 	}, [isSessionReady, session.agentInfo, logger]);
 
 	// ============================================================
-	// Effects - Save Session Messages on Turn End
-	// ============================================================
-	const prevIsSendingRef = useRef<boolean>(false);
-
-	// Re-loading/switching sessions disarms the trailing-chunk save & flush, so
-	// freshly loaded/replayed messages are never re-saved (which would bump
-	// updatedAt and corrupt "last used" ordering). (#320 review)
-	useEffect(() => {
-		sentThisSessionRef.current = false;
-	}, [session.sessionId]);
-
-	useEffect(() => {
-		const wasSending = prevIsSendingRef.current;
-		prevIsSendingRef.current = isSending;
-
-		// Save when turn ends (isSending: true -> false) and has messages
-		if (
-			wasSending &&
-			!isSending &&
-			session.sessionId &&
-			messages.length > 0
-		) {
-			sentThisSessionRef.current = true;
-			lastSavedMessagesRef.current = messages;
-			sessionHistory.saveSessionMessages(session.sessionId, messages);
-			logger.log(
-				`[ChatPanel] Session messages saved: ${session.sessionId}`,
-			);
-
-			// System notification on response completion
-			if (
-				settings.enableSystemNotifications &&
-				!activeDocument.hasFocus()
-			) {
-				new Notification("Agent Client", {
-					body: `${activeAgentLabel} has completed the response.`,
-				});
-			}
-		}
-	}, [
-		isSending,
-		session.sessionId,
-		messages,
-		sessionHistory.saveSessionMessages,
-		settings.enableSystemNotifications,
-		activeAgentLabel,
-		logger,
-	]);
-
-	// Some agents (e.g. OpenCode) emit trailing message chunks *after* end_turn,
-	// so the turn-end save above runs before they arrive and the persisted copy
-	// is truncated. Re-save when messages change while idle, debounced so rapid
-	// trailing updates coalesce into a single write (avoids racing the file). (#320)
-	useEffect(() => {
-		const sessionId = session.sessionId;
-		if (isSending || !sessionId || messages.length === 0) return;
-		if (!sentThisSessionRef.current) return;
-		if (lastSavedMessagesRef.current === messages) return;
-		const timer = window.setTimeout(() => {
-			lastSavedMessagesRef.current = messages;
-			sessionHistory.saveSessionMessages(sessionId, messages);
-		}, TRAILING_SAVE_DEBOUNCE_MS);
-		return () => window.clearTimeout(timer);
-	}, [
-		isSending,
-		session.sessionId,
-		messages,
-		sessionHistory.saveSessionMessages,
-	]);
-
-	// ============================================================
 	// Effects - Notify ViewRegistry of State Changes
 	// ============================================================
-	// `hasMessages` flips false → true on first message and then stays stable
-	// for the rest of the conversation. The Session Manager's title and
-	// status only depend on this boolean transition, not on per-chunk growth,
-	// so we avoid notifying on every streamed token.
-	const hasMessages = messages.length > 0;
-	useEffect(() => {
-		plugin.viewRegistry.notifyChange();
-	}, [
-		plugin.viewRegistry,
-		session.state,
-		session.sessionId,
+	useViewRegistryNotifier({
+		viewRegistry: plugin.viewRegistry,
+		sessionState: session.state,
+		sessionId: session.sessionId,
 		isSending,
-		agent.hasActivePermission,
-		sessionHistory.loading,
-		hasMessages,
-	]);
+		hasActivePermission: agent.hasActivePermission,
+		isRestoringSession: sessionHistory.loading,
+		messages,
+	});
 
 	// ============================================================
 	// Effects - Notify Sidebar Container of Session Title Changes
@@ -1117,175 +856,38 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// ============================================================
 	// Effects - Workspace Events (Hotkeys)
 	// ============================================================
-
-	// Refs for workspace event handlers (avoids re-registering on every render)
-	const handleNewChatWithPersistRef = useRef(handleNewChatWithPersist);
-	const handleNewChatRef = useRef(handleNewChat);
-	const approveActivePermissionRef = useRef(agent.approveActivePermission);
-	const rejectActivePermissionRef = useRef(agent.rejectActivePermission);
-	const handleStopGenerationRef = useRef(handleStopGeneration);
-	const handleExportChatRef = useRef(handleExportChat);
-	handleNewChatWithPersistRef.current = handleNewChatWithPersist;
-	handleNewChatRef.current = handleNewChat;
-	approveActivePermissionRef.current = agent.approveActivePermission;
-	rejectActivePermissionRef.current = agent.rejectActivePermission;
-	handleStopGenerationRef.current = handleStopGeneration;
-	handleExportChatRef.current = handleExportChat;
-
-	useEffect(() => {
-		const workspace = plugin.app.workspace;
-		const ws = workspace as unknown as {
-			on: (
-				name: string,
-				callback: (...args: never[]) => void,
-			) => ReturnType<typeof workspace.on>;
-		};
-
-		const refs = [
-			// Toggle auto-mention
-			ws.on(
-				"agent-client:toggle-auto-mention",
-				(targetViewId?: string) => {
-					if (targetViewId && targetViewId !== viewId) return;
-					suggestions.mentions.toggleAutoMention();
-				},
-			),
-
-			// New chat requested (from "New chat" or "Switch agent to" commands)
-			ws.on(
-				"agent-client:new-chat-requested",
-				(targetViewId?: string, agentId?: string) => {
-					if (targetViewId && targetViewId !== viewId) return;
-					if (variant === "sidebar") {
-						void handleNewChatWithPersistRef.current(agentId);
-					} else {
-						void handleNewChatRef.current(agentId);
-					}
-				},
-			),
-
-			// Approve active permission
-			ws.on(
-				"agent-client:approve-active-permission",
-				(targetViewId?: string) => {
-					if (targetViewId && targetViewId !== viewId) return;
-					void (async () => {
-						const success =
-							await approveActivePermissionRef.current();
-						if (!success) {
-							new Notice(
-								"[Agent Client] No active permission request",
-							);
-						}
-					})();
-				},
-			),
-
-			// Reject active permission
-			ws.on(
-				"agent-client:reject-active-permission",
-				(targetViewId?: string) => {
-					if (targetViewId && targetViewId !== viewId) return;
-					void (async () => {
-						const success =
-							await rejectActivePermissionRef.current();
-						if (!success) {
-							new Notice(
-								"[Agent Client] No active permission request",
-							);
-						}
-					})();
-				},
-			),
-
-			// Cancel current message
-			ws.on("agent-client:cancel-message", (targetViewId?: string) => {
-				if (targetViewId && targetViewId !== viewId) return;
-				void handleStopGenerationRef.current();
-			}),
-
-			// Export chat
-			ws.on("agent-client:export-chat", (targetViewId?: string) => {
-				if (targetViewId && targetViewId !== viewId) return;
-				void handleExportChatRef.current();
-			}),
-		];
-
-		return () => {
-			for (const ref of refs) {
-				workspace.offref(ref);
-			}
-		};
-	}, [
-		plugin.app.workspace,
-		plugin.lastActiveChatViewId,
+	useWorkspaceHotkeys({
+		plugin,
 		viewId,
 		variant,
-		suggestions.mentions.toggleAutoMention,
-	]);
+		handleNewChatWithPersist,
+		handleNewChat,
+		toggleAutoMention: suggestions.mentions.toggleAutoMention,
+		approveActivePermission: agent.approveActivePermission,
+		rejectActivePermission: agent.rejectActivePermission,
+		handleStopGeneration,
+		handleExportChat,
+	});
 
-	// Deterministic prompt delivery: register a handler the plugin invokes
-	// directly (or that drains a queued prompt) instead of a timed workspace
-	// broadcast. setInputValue / setPendingAutoSend are stable useState
-	// setters, so [plugin, viewId] deps suffice.
-	useEffect(() => {
-		return plugin.registerPendingPromptHandler(
-			viewId,
-			(prompt, autoSend) => {
-				if (typeof prompt !== "string" || prompt.length === 0) return;
-				setInputValue(prompt);
-				// Injected prompts are a fresh message — don't carry over any
-				// attachments already staged in this panel (#341/#6).
-				setAttachedFiles([]);
-				if (autoSend) setPendingAutoSend(prompt);
-			},
-		);
-	}, [plugin, viewId]);
-
-	// ============================================================
-	// Effects - Drain pending auto-send when session becomes ready
-	// ============================================================
-	useEffect(() => {
-		if (!pendingAutoSend) return;
-		if (!isSessionReady) return;
-		if (isSending) return;
-		if (sessionHistory.loading) return;
-
-		const prompt = pendingAutoSend;
-		setPendingAutoSend(null);
-		setInputValue("");
-		void handleSendMessage(prompt);
-	}, [
-		pendingAutoSend,
+	// Deterministic prompt delivery (agent buttons / commands) + auto-send
+	// drain once the session becomes ready.
+	usePendingPrompt({
+		plugin,
+		viewId,
+		setInputValue,
+		clearAttachments,
 		isSessionReady,
 		isSending,
-		sessionHistory.loading,
-		handleSendMessage,
-	]);
+		isRestoringSession: sessionHistory.loading,
+		sendMessage: handleSendMessage,
+	});
 
 	// ============================================================
 	// Effects - Focus Tracking
 	// ============================================================
-	const containerRef = useRef<HTMLDivElement>(null);
-	useEffect(() => {
-		const handleFocus = () => {
-			plugin.setLastActiveChatViewId(viewId);
-		};
-
-		const container = containerElProp ?? containerRef.current;
-		if (!container) return;
-
-		container.addEventListener("focus", handleFocus, true);
-		container.addEventListener("click", handleFocus);
-
-		// Set as active on mount (first opened view becomes active)
-		plugin.setLastActiveChatViewId(viewId);
-
-		return () => {
-			container.removeEventListener("focus", handleFocus, true);
-			container.removeEventListener("click", handleFocus);
-		};
-	}, [plugin, viewId, containerElProp]);
+	// Ref goes on the sidebar/embedded container div below; floating passes
+	// its parent's container via containerElProp.
+	const containerRef = useFocusTracking({ plugin, viewId, containerElProp });
 
 	// ============================================================
 	// Callback Registration for IChatViewContainer
@@ -1300,6 +902,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const hasActivePermissionRef = useRef(agent.hasActivePermission);
 	const sessionHistoryLoadingRef = useRef(sessionHistory.loading);
 	const handleSendMessageRef = useRef(handleSendMessage);
+	const handleStopGenerationRef = useRef(handleStopGeneration);
 	inputValueRef.current = inputValue;
 	attachedFilesRef.current = attachedFiles;
 	isSessionReadyRef.current = isSessionReady;
@@ -1309,6 +912,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	hasActivePermissionRef.current = agent.hasActivePermission;
 	sessionHistoryLoadingRef.current = sessionHistory.loading;
 	handleSendMessageRef.current = handleSendMessage;
+	handleStopGenerationRef.current = handleStopGeneration;
 
 	useEffect(() => {
 		onRegisterCallbacks?.({
