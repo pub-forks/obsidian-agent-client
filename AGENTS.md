@@ -33,7 +33,7 @@ src/
 │   ├── message-sender.ts        # Prompt preparation + sending (pure functions)
 │   ├── chat-exporter.ts         # Markdown export with frontmatter
 │   ├── view-registry.ts         # Multi-view management, focus, broadcast
-│   └── update-checker.ts        # Agent version checking (plugin self-update check lives in plugin.ts)
+│   └── update-checker.ts        # Agent + plugin version checking (checkAgentUpdate / checkPluginUpdate)
 ├── hooks/                       # React custom hooks (state + logic)
 │   ├── useAgent.ts              # Facade: composes useAgentSession + useAgentMessages
 │   ├── useAgentSession.ts       # Session lifecycle, config options, optimistic updates
@@ -81,7 +81,7 @@ src/
 │   ├── wikilink-formatter.ts    # <obsidian_note_links> block formatting (pure)
 │   ├── text.ts                  # Text helpers (truncateTitle)
 │   └── logger.ts                # Debug-mode logger
-├── plugin.ts                    # Obsidian plugin lifecycle, settings persistence, AcpClient pool, code block processors, plugin self-update check
+├── plugin.ts                    # Obsidian plugin lifecycle, settings persistence, service wiring (AcpClientPool, PromptRouter, EmbedIdInjector), code block processors
 └── main.ts                      # Entry point
 ```
 
@@ -199,7 +199,7 @@ AcpClient instances are owned by the plugin, not by views: `plugin._acpClients: 
 **preset-agents**: Static registry (`PRESET_AGENTS`) of preset agent definitions — identity, spawn defaults, legacy data.json migration keys, API-key wiring, install hints, settings-UI copy. User overrides live in `settings.presetAgents[presetId]`
 **settings-normalizer**: Validation helpers (str, bool, num, enumVal, obj, strRecord, xyPoint) + toAgentConfig + parseChatFontSize + normalizePresetAgents (legacy data.json migration; secret-storage side effects injected via ApiKeyMigrator)
 **session-helpers**: Pure functions — buildAgentConfigWithApiKey, findAgentSettings, getAvailableAgentsFromSettings / getAllAgentsFromSettings (single enumeration implementation; plugin.getAvailableAgents delegates here), enabled/default-agent policy (isAgentEnabled, firstEnabledAgentId, repairNoEnabledAgents, getDefaultAgentId, getCurrentAgent), computeSessionTitle, buildGeminiDeprecationNotice
-**update-checker**: Agent version checking via npm registry (checkAgentUpdate). The plugin's own update check (GitHub releases) lives in plugin.ts
+**update-checker**: Agent version checking via npm registry (checkAgentUpdate) + the plugin's own update check against GitHub releases (checkPluginUpdate; plugin.checkForUpdates delegates to it)
 **session-state**: Pure functions — applyLegacyValue, tryRestoreConfigOption, restoreLegacyConfig
 **message-state**: Pure functions — applySingleUpdate, applyUpsertToolCall, mergeToolCallContent, findActivePermission, selectOption
 **message-sender**: Pure functions — preparePrompt (embedded context vs XML text, shared helpers), sendPreparedPrompt (auth retry)

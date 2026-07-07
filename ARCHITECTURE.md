@@ -34,7 +34,7 @@ src/
 │   ├── message-sender.ts           # Prompt preparation + sending (pure functions)
 │   ├── chat-exporter.ts            # Markdown export with frontmatter
 │   ├── view-registry.ts            # Multi-view management, focus, broadcast
-│   └── update-checker.ts           # Agent version checking (plugin self-update check lives in plugin.ts)
+│   └── update-checker.ts           # Agent + plugin version checking (checkAgentUpdate / checkPluginUpdate)
 │
 ├── hooks/                          # React Custom Hooks (state + logic)
 │   ├── useAgent.ts                 # Facade: composes useAgentSession + useAgentMessages
@@ -138,7 +138,7 @@ src/
 | `message-sender.ts` | Pure functions — prompt preparation (embedded context vs XML text, shared helpers), sending with auth retry |
 | `chat-exporter.ts` | `ChatExporter` class — markdown export with frontmatter, image handling |
 | `view-registry.ts` | `ChatViewRegistry` class — multi-view focus tracking, broadcast commands. Exports `IChatViewContainer`. |
-| `update-checker.ts` | Agent version checking via npm registry (the plugin's own update check lives in plugin.ts) |
+| `update-checker.ts` | Agent version checking via npm registry + plugin self-update check (`checkPluginUpdate`) |
 
 ---
 
