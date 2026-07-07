@@ -94,6 +94,38 @@ export default defineConfig([
 			],
 		},
 	},
+	// utils/ must stay Obsidian-free.
+	// Sanctioned exceptions: Platform detection (platform/error-utils/paths) and
+	// Obsidian's bundled YAML parser (agent-block-parser). See refactoring plan.
+	{
+		files: ["src/utils/**/*.ts"],
+		ignores: [
+			"src/utils/platform.ts",
+			"src/utils/error-utils.ts",
+			"src/utils/paths.ts",
+			"src/utils/agent-block-parser.ts",
+		],
+		rules: {
+			"no-restricted-imports": [
+				"error",
+				{
+					patterns: [
+						{
+							group: ["obsidian"],
+							message:
+								"utils/ must stay Obsidian-free (see refactoring plan).",
+						},
+						// Re-stated here because this block's rule entry replaces
+						// the earlier "outside acp/" one for these files.
+						{
+							group: ["@agentclientprotocol/*"],
+							message: "ACP SDK is confined to src/acp/.",
+						},
+					],
+				},
+			],
+		},
+	},
 	// acp/ must not import React, and must not import the plugin at all
 	// (type imports included) — it talks to its host via AcpClientHost
 	// (src/acp/host.ts) instead.
