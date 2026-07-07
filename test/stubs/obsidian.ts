@@ -9,6 +9,8 @@
  *   `src/utils/paths.ts`. Tests mutate these to exercise platform branches.
  * - `parseYaml`: YAML parser used by `src/utils/agent-block-parser.ts`,
  *   delegated to the `yaml` package.
+ * - `TFile` / `TFolder`: class stand-ins with real-class identity so that
+ *   `instanceof` checks in the code under test work with fixtures.
  */
 
 import { parse as parseYamlImpl } from "yaml";
@@ -31,6 +33,20 @@ export class TFile {
 	constructor(path: string, basename: string) {
 		this.path = path;
 		this.basename = basename;
+	}
+}
+
+/**
+ * Minimal `TFolder` stand-in. Used by fakes (e.g. `test/helpers/fake-plugin.ts`)
+ * so that folders returned from `getAbstractFileByPath` are truthy but fail
+ * `instanceof TFile` checks, matching Obsidian's behavior.
+ */
+export class TFolder {
+	path: string;
+	name: string;
+	constructor(path: string) {
+		this.path = path;
+		this.name = path.split("/").pop() ?? path;
 	}
 }
 
