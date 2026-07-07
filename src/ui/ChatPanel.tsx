@@ -53,7 +53,7 @@ const EMPTY_COMMANDS: SlashCommand[] = [];
 // Component imports
 import { ChatHeader } from "./ChatHeader";
 import { MessageList } from "./MessageList";
-import { InputArea } from "./InputArea";
+import { InputArea, type ActiveNotice } from "./InputArea";
 import type { IChatViewHost } from "./view-host";
 
 // ============================================================================
@@ -425,6 +425,37 @@ export const ChatPanel = React.memo(function ChatPanel({
 		() => setGeminiNoticeDismissed(true),
 		[],
 	);
+
+	// Single notice slot for InputArea: highest-priority visible overlay
+	// (error > agent update > Gemini notice). Lower-priority notices are
+	// hidden, not cleared — their state stays with each owner (useAgent /
+	// useChatActions / ChatPanel local), so they reappear when the
+	// higher-priority one clears.
+	const activeNotice = useMemo<ActiveNotice | null>(() => {
+		if (errorInfo) {
+			return { info: errorInfo, onClear: handleClearError };
+		}
+		if (agentUpdateNotification) {
+			return {
+				info: agentUpdateNotification,
+				onClear: handleClearAgentUpdate,
+			};
+		}
+		if (effectiveGeminiNotice) {
+			return {
+				info: effectiveGeminiNotice,
+				onClear: handleClearGeminiNotice,
+			};
+		}
+		return null;
+	}, [
+		errorInfo,
+		handleClearError,
+		agentUpdateNotification,
+		handleClearAgentUpdate,
+		effectiveGeminiNotice,
+		handleClearGeminiNotice,
+	]);
 
 	// Wrap send so the Gemini notice also dismisses on send, mirroring how
 	// useChatActions clears agentUpdateNotification inside handleSendMessage.
@@ -1460,15 +1491,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 			onInputChange={setInputValue}
 			attachedFiles={attachedFiles}
 			onAttachedFilesChange={setAttachedFiles}
-			// Error overlay props
-			errorInfo={errorInfo}
-			onClearError={handleClearError}
-			// Agent update notification props
-			agentUpdateNotification={agentUpdateNotification}
-			onClearAgentUpdate={handleClearAgentUpdate}
-			// Gemini CLI deprecation notice props
-			geminiNotice={effectiveGeminiNotice}
-			onClearGeminiNotice={handleClearGeminiNotice}
+			// Notice overlay (priority resolved above)
+			activeNotice={activeNotice}
 			messages={messages}
 		/>
 	);
