@@ -2,8 +2,8 @@ import * as React from "react";
 const { useState, useCallback } = React;
 import { setIcon } from "obsidian";
 import type { ChatMessage, MessageContent } from "../types/chat";
-import type { AcpClient } from "../acp/acp-client";
 import type AgentClientPlugin from "../plugin";
+import { useChatContext } from "./ChatContext";
 import { MarkdownRenderer } from "./shared/MarkdownRenderer";
 import { TerminalBlock } from "./TerminalBlock";
 import { ToolCallBlock } from "./ToolCallBlock";
@@ -151,9 +151,7 @@ function CollapsibleThought({ text, plugin }: CollapsibleThoughtProps) {
 
 interface ContentBlockProps {
 	content: MessageContent;
-	plugin: AgentClientPlugin;
 	messageRole?: "user" | "assistant";
-	terminalClient?: AcpClient;
 	/** Callback to approve a permission request */
 	onApprovePermission?: (
 		requestId: string,
@@ -163,11 +161,10 @@ interface ContentBlockProps {
 
 function ContentBlock({
 	content,
-	plugin,
 	messageRole,
-	terminalClient,
 	onApprovePermission,
 }: ContentBlockProps) {
+	const { plugin } = useChatContext();
 	switch (content.type) {
 		case "text":
 			// User messages: render with mention support
@@ -194,8 +191,6 @@ function ContentBlock({
 			return (
 				<ToolCallBlock
 					content={content}
-					plugin={plugin}
-					terminalClient={terminalClient}
 					onApprovePermission={onApprovePermission}
 				/>
 			);
@@ -241,12 +236,7 @@ function ContentBlock({
 		}
 
 		case "terminal":
-			return (
-				<TerminalBlock
-					terminalId={content.terminalId}
-					terminalClient={terminalClient || null}
-				/>
-			);
+			return <TerminalBlock terminalId={content.terminalId} />;
 
 		case "image":
 			return (
@@ -285,8 +275,6 @@ function ContentBlock({
 
 export interface MessageBubbleProps {
 	message: ChatMessage;
-	plugin: AgentClientPlugin;
-	terminalClient?: AcpClient;
 	/** Callback to approve a permission request */
 	onApprovePermission?: (
 		requestId: string,
@@ -383,8 +371,6 @@ function groupContent(
 
 export const MessageBubble = React.memo(function MessageBubble({
 	message,
-	plugin,
-	terminalClient,
 	onApprovePermission,
 }: MessageBubbleProps) {
 	const groups = groupContent(message.content);
@@ -405,9 +391,7 @@ export const MessageBubble = React.memo(function MessageBubble({
 								<ContentBlock
 									key={imgIdx}
 									content={content}
-									plugin={plugin}
 									messageRole={message.role}
-									terminalClient={terminalClient}
 									onApprovePermission={onApprovePermission}
 								/>
 							))}
@@ -419,9 +403,7 @@ export const MessageBubble = React.memo(function MessageBubble({
 						<div key={idx}>
 							<ContentBlock
 								content={group.item}
-								plugin={plugin}
 								messageRole={message.role}
-								terminalClient={terminalClient}
 								onApprovePermission={onApprovePermission}
 							/>
 						</div>

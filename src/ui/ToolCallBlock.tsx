@@ -2,8 +2,7 @@ import * as React from "react";
 const { useState, useMemo } = React;
 import { FileSystemAdapter } from "obsidian";
 import type { MessageContent } from "../types/chat";
-import type { AcpClient } from "../acp/acp-client";
-import type AgentClientPlugin from "../plugin";
+import { useChatContext } from "./ChatContext";
 import { TerminalBlock } from "./TerminalBlock";
 import { PermissionBanner } from "./PermissionBanner";
 import { LucideIcon } from "./shared/IconButton";
@@ -12,8 +11,6 @@ import * as Diff from "diff";
 
 interface ToolCallBlockProps {
 	content: Extract<MessageContent, { type: "tool_call" }>;
-	plugin: AgentClientPlugin;
-	terminalClient?: AcpClient;
 	/** Callback to approve a permission request */
 	onApprovePermission?: (
 		requestId: string,
@@ -23,10 +20,9 @@ interface ToolCallBlockProps {
 
 export const ToolCallBlock = React.memo(function ToolCallBlock({
 	content,
-	plugin,
-	terminalClient,
 	onApprovePermission,
 }: ToolCallBlockProps) {
+	const { plugin } = useChatContext();
 	const {
 		kind,
 		title,
@@ -143,7 +139,6 @@ export const ToolCallBlock = React.memo(function ToolCallBlock({
 							<TerminalBlock
 								key={index}
 								terminalId={item.terminalId}
-								terminalClient={terminalClient || null}
 							/>
 						);
 					}
@@ -152,7 +147,6 @@ export const ToolCallBlock = React.memo(function ToolCallBlock({
 							<DiffRenderer
 								key={index}
 								diff={item}
-								plugin={plugin}
 								autoCollapse={
 									plugin.settings.displaySettings
 										.autoCollapseDiffs
@@ -198,7 +192,6 @@ interface DiffRendererProps {
 		oldText?: string | null;
 		newText: string;
 	};
-	plugin: AgentClientPlugin;
 	autoCollapse?: boolean;
 	collapseThreshold?: number;
 }

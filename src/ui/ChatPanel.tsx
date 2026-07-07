@@ -23,7 +23,6 @@ import { addRenameSessionMenuItem } from "./EditTitleModal";
 import { getLogger } from "../utils/logger";
 
 // Adapter imports
-import type { AcpClient } from "../acp/acp-client";
 import type { AgentClientPluginSettings } from "../plugin";
 
 // Context imports
@@ -344,11 +343,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// is what caused the persist-restore re-spawn race.
 	const hasInitializedRef = useRef(false);
 	const lastInitAgentRef = useRef<string | undefined>(undefined);
-
-	// ============================================================
-	// Refs
-	// ============================================================
-	const terminalClientRef = useRef<AcpClient>(acpClient);
 
 	// ============================================================
 	// Computed Values
@@ -1440,9 +1434,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			isSessionReady={isSessionReady}
 			isRestoringSession={sessionHistory.loading}
 			agentLabel={activeAgentLabel}
-			plugin={plugin}
 			view={viewHost}
-			terminalClient={terminalClientRef.current}
 			onApprovePermission={agent.approvePermission}
 			hasActivePermission={agent.hasActivePermission}
 		/>

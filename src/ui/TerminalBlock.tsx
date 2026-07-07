@@ -1,16 +1,15 @@
 import * as React from "react";
 const { useState, useRef, useEffect } = React;
-import type { AcpClient } from "../acp/acp-client";
+import { useChatContext } from "./ChatContext";
 import { getLogger } from "../utils/logger";
 interface TerminalBlockProps {
 	terminalId: string;
-	terminalClient: AcpClient | null;
 }
 
 export const TerminalBlock = React.memo(function TerminalBlock({
 	terminalId,
-	terminalClient,
 }: TerminalBlockProps) {
+	const { acpClient: terminalClient } = useChatContext();
 	const logger = getLogger();
 	const [output, setOutput] = useState("");
 	const [exitStatus, setExitStatus] = useState<{

@@ -2,8 +2,6 @@ import * as React from "react";
 const { useRef, useState, useEffect, useCallback } = React;
 
 import type { ChatMessage } from "../types/chat";
-import type { AcpClient } from "../acp/acp-client";
-import type AgentClientPlugin from "../plugin";
 import type { IChatViewHost } from "./view-host";
 import { setIcon } from "obsidian";
 import { MessageBubble } from "./MessageBubble";
@@ -30,12 +28,8 @@ export interface MessageListProps {
 	isRestoringSession: boolean;
 	/** Display name of the active agent */
 	agentLabel: string;
-	/** Plugin instance */
-	plugin: AgentClientPlugin;
 	/** View instance for event registration */
 	view: IChatViewHost;
-	/** Terminal client for output polling */
-	terminalClient?: AcpClient;
 	/** Callback to approve a permission request */
 	onApprovePermission?: (
 		requestId: string,
@@ -63,9 +57,7 @@ export function MessageList({
 	isSessionReady,
 	isRestoringSession,
 	agentLabel,
-	plugin,
 	view,
-	terminalClient,
 	onApprovePermission,
 	hasActivePermission,
 }: MessageListProps) {
@@ -270,8 +262,6 @@ export function MessageList({
 						>
 							<MessageBubble
 								message={message}
-								plugin={plugin}
-								terminalClient={terminalClient}
 								onApprovePermission={onApprovePermission}
 							/>
 						</div>
