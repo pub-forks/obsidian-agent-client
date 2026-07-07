@@ -533,8 +533,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 				toggle
 					.setValue(this.plugin.settings.promptInjection.enabled)
 					.onChange(async (value) => {
-						this.plugin.settings.promptInjection.enabled = value;
-						await this.plugin.saveSettings();
+						await this.plugin.settingsService.updateSettings({
+							promptInjection: {
+								...this.plugin.settings.promptInjection,
+								enabled: value,
+							},
+						});
 						this.refreshDisplay();
 					}),
 			);
@@ -551,9 +555,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 							this.plugin.settings.promptInjection.wikiLinks,
 						)
 						.onChange(async (value) => {
-							this.plugin.settings.promptInjection.wikiLinks =
-								value;
-							await this.plugin.saveSettings();
+							await this.plugin.settingsService.updateSettings({
+								promptInjection: {
+									...this.plugin.settings.promptInjection,
+									wikiLinks: value,
+								},
+							});
 						}),
 				);
 
@@ -566,8 +573,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					toggle
 						.setValue(this.plugin.settings.promptInjection.tables)
 						.onChange(async (value) => {
-							this.plugin.settings.promptInjection.tables = value;
-							await this.plugin.saveSettings();
+							await this.plugin.settingsService.updateSettings({
+								promptInjection: {
+									...this.plugin.settings.promptInjection,
+									tables: value,
+								},
+							});
 						}),
 				);
 
@@ -580,8 +591,12 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					toggle
 						.setValue(this.plugin.settings.promptInjection.latex)
 						.onChange(async (value) => {
-							this.plugin.settings.promptInjection.latex = value;
-							await this.plugin.saveSettings();
+							await this.plugin.settingsService.updateSettings({
+								promptInjection: {
+									...this.plugin.settings.promptInjection,
+									latex: value,
+								},
+							});
 						}),
 				);
 		}
