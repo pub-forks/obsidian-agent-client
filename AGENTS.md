@@ -3,7 +3,7 @@
 ## Overview
 Obsidian plugin for AI agent interaction (Claude Code, Codex, Gemini CLI, Mistral Vibe, custom agents) via ACP.
 
-**Tech**: React 19, TypeScript, Obsidian API, Agent Client Protocol (ACP)
+**Tech**: React 18.3.1 (intentional — do not bump to 19), TypeScript, Obsidian API, Agent Client Protocol (ACP)
 
 ## Architecture
 
@@ -13,7 +13,8 @@ src/
 │   ├── chat.ts                  # ChatMessage, MessageContent, PromptContent, AttachedFile, ActivePermission
 │   ├── session.ts               # ChatSession, SessionUpdate (12-type union), SessionInfo, Capabilities
 │   ├── agent.ts                 # BaseAgentSettings, PresetAgentUserSettings, CustomAgentSettings
-│   └── errors.ts                # AcpError, ProcessError, ErrorInfo
+│   ├── errors.ts                # AcpError, ProcessError, ErrorInfo
+│   └── obsidian-internals.d.ts  # Type augmentation for unofficial Obsidian APIs
 ├── acp/                         # ACP protocol (SDK dependency confined here)
 │   ├── acp-client.ts            # Process lifecycle, UI-facing API (AcpClient class)
 │   ├── acp-handler.ts           # SDK event handler + sessionId filter + listener broadcast
@@ -32,7 +33,7 @@ src/
 │   ├── message-sender.ts        # Prompt preparation + sending (pure functions)
 │   ├── chat-exporter.ts         # Markdown export with frontmatter
 │   ├── view-registry.ts         # Multi-view management, focus, broadcast
-│   └── update-checker.ts        # Agent/plugin version checking
+│   └── update-checker.ts        # Agent version checking (plugin self-update check lives in plugin.ts)
 ├── hooks/                       # React custom hooks (state + logic)
 │   ├── useAgent.ts              # Facade: composes useAgentSession + useAgentMessages
 │   ├── useAgentSession.ts       # Session lifecycle, config options, optimistic updates
@@ -41,16 +42,19 @@ src/
 │   ├── useSessionHistory.ts     # Session list/load/resume/fork
 │   ├── useChatActions.ts        # Business callbacks (send, newChat, export, restart, etc.)
 │   ├── useHistoryModal.ts       # Session history modal lifecycle
-│   └── useSettings.ts           # Settings subscription (useSyncExternalStore)
+│   └── useSettings.ts           # Settings subscription (useSettings + useSettingsSelector, useSyncExternalStore)
 ├── ui/                          # React components
 │   ├── ChatContext.ts           # React Context (plugin, acpClient, vaultService, settingsService)
 │   ├── ChatPanel.tsx            # Orchestrator: calls hooks, workspace events, rendering
 │   ├── ChatView.tsx             # Sidebar view (ItemView wrapper)
 │   ├── FloatingChatView.tsx     # Floating window (position/drag/resize)
-│   ├── ChatHeader.tsx           # Header (sidebar + floating variants)
+│   ├── CodeBlockChatView.tsx    # Embedded chat in markdown code blocks (```agent-client / ```agent)
+│   ├── AgentButtonBlock.tsx     # Quick-action button block (type: button → runPromptInChat)
+│   ├── SessionManagerView.tsx   # Session manager view (observes open chat views, not a chat itself)
+│   ├── ChatHeader.tsx           # Header (sidebar + floating + embedded variants)
 │   ├── MessageList.tsx          # Virtualized message list (@tanstack/react-virtual)
 │   ├── MessageBubble.tsx        # Single message rendering (content dispatch, copy button)
-│   ├── ToolCallBlock.tsx        # Tool call + diff display (word-level highlighting)
+│   ├── ToolCallBlock.tsx        # Tool call + diff display (word-level highlighting) + collapsible text output panel
 │   ├── TerminalBlock.tsx        # Terminal output polling
 │   ├── InputArea.tsx            # Textarea, attachments, mentions, history
 │   ├── InputToolbar.tsx         # Config/mode/model selectors, usage, send button
@@ -58,6 +62,8 @@ src/
 │   ├── PermissionBanner.tsx     # Permission request buttons
 │   ├── ErrorBanner.tsx          # Error/notification overlay
 │   ├── SessionHistoryModal.tsx  # Session history modal (list + confirm delete)
+│   ├── EditTitleModal.ts        # Session title rename modal
+│   ├── ChangeDirectoryModal.ts  # Working directory picker modal (Electron dialog)
 │   ├── FloatingButton.tsx       # Draggable launch button
 │   ├── SettingsTab.ts           # Plugin settings UI
 │   ├── view-host.ts             # IChatViewHost interface
@@ -65,13 +71,17 @@ src/
 │       ├── IconButton.tsx       # Icon button + Lucide icon wrapper
 │       ├── MarkdownRenderer.tsx # Obsidian markdown rendering
 │       └── AttachmentStrip.tsx  # Attachment preview strip
-├── utils/                       # Shared utilities (pure functions)
-│   ├── platform.ts              # Shell, WSL, Windows env, command building
+├── utils/                       # Shared utilities (mostly pure; some Obsidian/Node coupling — see notes per file)
+│   ├── platform.ts              # Shell, WSL, Windows env, command building (execSync + Obsidian Platform)
 │   ├── paths.ts                 # Path resolution, file:// URI
 │   ├── error-utils.ts           # ACP error conversion
 │   ├── mention-parser.ts        # @[[note]] detection/extraction
+│   ├── agent-block-parser.ts    # YAML parser for agent-client/agent code blocks (chat | button)
+│   ├── wikilink-resolver.ts     # Wikilink resolution via Obsidian metadata cache (App-dependent)
+│   ├── wikilink-formatter.ts    # <obsidian_note_links> block formatting (pure)
+│   ├── text.ts                  # Text helpers (truncateTitle)
 │   └── logger.ts                # Debug-mode logger
-├── plugin.ts                    # Obsidian plugin lifecycle, settings persistence
+├── plugin.ts                    # Obsidian plugin lifecycle, settings persistence, AcpClient pool, code block processors, plugin self-update check
 └── main.ts                      # Entry point
 ```
 
@@ -104,18 +114,26 @@ Central orchestrator component.
 
 ChatPanel does NOT route session updates — that's handled internally by useAgent.
 
-### ChatView / FloatingChatView (`ui/ChatView.tsx`, `ui/FloatingChatView.tsx`)
+### ChatView / FloatingChatView / CodeBlockChatView (`ui/ChatView.tsx`, `ui/FloatingChatView.tsx`, `ui/CodeBlockChatView.tsx`)
 Thin wrappers that:
-- Create services (AcpClient, VaultService) in lifecycle methods
+- Obtain AcpClient from the plugin-owned pool (`plugin.getOrCreateAcpClient(viewId)`); create VaultService per view
 - Provide ChatContext (plugin, acpClient, vaultService, settingsService)
-- Render `<ChatPanel variant="sidebar" | "floating" />`
+- Render `<ChatPanel variant="sidebar" | "floating" | "embedded" />`
 - Implement IChatViewContainer for broadcast commands
 
 FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand/collapse.
 
+### AcpClient Pool (`plugin.ts`)
+AcpClient instances are owned by the plugin, not by views: `plugin._acpClients: Map<viewId, AcpClient>` via `getOrCreateAcpClient(viewId)`. Embedded views call `acquireAcpClient`/`releaseAcpClient`; release schedules a graceful teardown with a 250ms grace window so re-mounts (e.g. markdown re-render) keep the agent process alive.
+
+### Embedded Chat & Agent Button (code blocks)
+`plugin.ts` registers markdown code block processors for the languages `agent-client` and `agent` (both handled by `renderAgentBlock`). The fence body is YAML, parsed by `utils/agent-block-parser.ts` and dispatched by `type`:
+- `chat` (default): mounts CodeBlockChatView (embedded ChatPanel). `ensureEmbedId` writes a stable `id` back into the code block so the session can be re-associated across re-renders (embedId is resolved via `getSavedSessionByEmbedId`).
+- `button`: mounts AgentButtonBlock; clicking calls `plugin.runPromptInChat`, which opens/focuses a chat view and delivers the prompt through a registered handler (queued if the panel has not mounted yet).
+
 ### Hooks (`hooks/`)
 
-**useAgent** (facade): Comp훈oses useAgentSession + useAgentMessages
+**useAgent** (facade): Composes useAgentSession + useAgentMessages
 - Single `onSessionUpdate` subscription
 - Unified `handleSessionUpdate` dispatches to both sub-hooks
 - Return is `useMemo`-wrapped for referential stability
@@ -123,7 +141,7 @@ FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand
 **useAgentSession**: Session lifecycle + config
 - `createSession()`: Build config, inject API keys, initialize + newSession
 - `setConfigOption()`: Optimistic update + rollback on error
-- `setMode()` / `setModel()`: Legacy API (deprecated, still used by many agents)
+- `setMode()`: Legacy API (deprecated, still used by many agents). There is no `setModel()` — model selection goes through the category `"model"` config option; `restoreLegacyConfig` restores mode only
 - Session-level update handler (commands, mode, config, usage, process_error)
 - Uses `sessionRef` pattern to stabilize callback deps
 
@@ -146,7 +164,7 @@ FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand
 - Owns restoredMessage and agentUpdateNotification state
 
 **useSessionHistory**: Session persistence
-- `restoreSession()`: Load/resume with local message fallback
+- `restoreSession()`: Load/resume — locally saved messages are preferred; agent history replay is the fallback when no local transcript exists
 - `forkSession()`: Create new branch from existing session
 - 5-minute cache with invalidation
 - Return is `useMemo`-wrapped
@@ -154,6 +172,8 @@ FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand
 **useHistoryModal**: Modal lifecycle
 - Lazy modal creation, props synchronization
 - Session operation callbacks (restore, fork, delete)
+
+**useSettings / useSettingsSelector** (`hooks/useSettings.ts`): Settings subscription via useSyncExternalStore. `useSettingsSelector` subscribes to a derived slice (ChatPanel uses it) — selectors rely on SettingsService emitting a new object per write (referential equality)
 
 ### ACP Client (`acp/acp-client.ts`) + ACP Handler (`acp/acp-handler.ts`)
 
@@ -167,7 +187,7 @@ FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand
 
 **AcpHandler** — SDK event receiver:
 - sessionUpdate: converts ACP types → domain types → broadcast to listeners
-- sessionId filter: only emits updates matching `currentSessionId`
+- sessionId filter: when `currentSessionId` is non-null, only emits updates matching it; when null, ALL updates pass through (spawn-failure process_error arrives with `sessionId: ""`)
 - requestPermission → PermissionManager
 - Terminal operations → TerminalManager
 
@@ -178,7 +198,8 @@ FloatingChatView uses `onRegisterExpanded` callback (not CustomEvent) for expand
 **SessionStorage**: Session metadata CRUD (in plugin settings) + message file I/O (sessions/*.json)
 **preset-agents**: Static registry (`PRESET_AGENTS`) of preset agent definitions — identity, spawn defaults, legacy data.json migration keys, API-key wiring, install hints, settings-UI copy. User overrides live in `settings.presetAgents[presetId]`
 **settings-normalizer**: Validation helpers (str, bool, num, enumVal, obj, strRecord, xyPoint) + toAgentConfig + parseChatFontSize + normalizePresetAgents (legacy data.json migration; secret-storage side effects injected via ApiKeyMigrator)
-**session-helpers**: Pure functions — buildAgentConfigWithApiKey, findAgentSettings, getAvailableAgentsFromSettings (single enumeration implementation; plugin.getAvailableAgents delegates here)
+**session-helpers**: Pure functions — buildAgentConfigWithApiKey, findAgentSettings, getAvailableAgentsFromSettings / getAllAgentsFromSettings (single enumeration implementation; plugin.getAvailableAgents delegates here), enabled/default-agent policy (isAgentEnabled, firstEnabledAgentId, repairNoEnabledAgents, getDefaultAgentId, getCurrentAgent), computeSessionTitle, buildGeminiDeprecationNotice
+**update-checker**: Agent version checking via npm registry (checkAgentUpdate). The plugin's own update check (GitHub releases) lives in plugin.ts
 **session-state**: Pure functions — applyLegacyValue, tryRestoreConfigOption, restoreLegacyConfig
 **message-state**: Pure functions — applySingleUpdate, applyUpsertToolCall, mergeToolCallContent, findActivePermission, selectOption
 **message-sender**: Pure functions — preparePrompt (embedded context vs XML text, shared helpers), sendPreparedPrompt (auth retry)
@@ -223,6 +244,9 @@ interface ISettingsAccess {
   // Session storage methods (delegated to SessionStorage internally)
   saveSession(info: SavedSessionInfo): Promise<void>;
   getSavedSessions(agentId?: string, cwd?: string): SavedSessionInfo[];
+  getSavedSessionByEmbedId(embedId: string): SavedSessionInfo | undefined;
+  updateSessionTitle(sessionId: string, newTitle: string, createIfMissing?: { agentId: string; cwd: string }): Promise<void>;
+  updateSession(sessionId: string, patch: Partial<Omit<SavedSessionInfo, "sessionId" | "createdAt">>): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   saveSessionMessages(sessionId: string, agentId: string, messages: ChatMessage[]): Promise<void>;
   loadSessionMessages(sessionId: string): Promise<ChatMessage[] | null>;
@@ -338,4 +362,4 @@ interface ISettingsAccess {
 
 ---
 
-**Last Updated**: April 2026 | **Architecture**: useAgent facade + sub-hooks | **Version**: 0.10.0-preview.1
+**Last Updated**: July 2026 | **Architecture**: useAgent facade + sub-hooks | **Version**: 0.11.0
