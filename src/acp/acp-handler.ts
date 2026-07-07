@@ -83,6 +83,14 @@ export class AcpHandler {
 						sessionId,
 						text: update.content.text,
 					});
+				} else {
+					this.logger.log(
+						"[AcpHandler] Dropped non-text chunk content:",
+						{
+							type: update.sessionUpdate,
+							contentType: update.content.type,
+						},
+					);
 				}
 				break;
 
@@ -95,7 +103,10 @@ export class AcpHandler {
 					title: update.title ?? undefined,
 					status: update.status || "pending",
 					kind: update.kind ?? undefined,
-					content: AcpTypeConverter.toToolCallContent(update.content),
+					content: AcpTypeConverter.toToolCallContent(
+						update.content,
+						this.logger,
+					),
 					locations: update.locations ?? undefined,
 					rawInput: update.rawInput as
 						| { [k: string]: unknown }
@@ -107,7 +118,7 @@ export class AcpHandler {
 				this.emitSessionUpdate({
 					type: "plan",
 					sessionId,
-					entries: update.entries,
+					entries: AcpTypeConverter.toPlanEntries(update.entries),
 				});
 				break;
 
@@ -130,6 +141,9 @@ export class AcpHandler {
 				break;
 
 			case "session_info_update":
+				// QUIRK-1: emitted but currently unhandled by both dispatchers
+				// (useAgentSession and message-state have no case for it) —
+				// a candidate for future SessionStorage integration.
 				this.emitSessionUpdate({
 					type: "session_info_update",
 					sessionId,

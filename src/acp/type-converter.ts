@@ -1,5 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
-import type { ToolCallContent, PromptContent } from "../types/chat";
+import type { PlanEntry, ToolCallContent, PromptContent } from "../types/chat";
+import type { Logger } from "../utils/logger";
 import type {
 	InitializeResult,
 	SessionConfigOption,
@@ -45,16 +46,32 @@ export class AcpTypeConverter {
 	}
 
 	/**
+	 * Convert ACP PlanEntry[] to domain PlanEntry[].
+	 *
+	 * Explicit field mapping so the domain type does not structurally
+	 * depend on the SDK type (e.g. `_meta` is intentionally not carried).
+	 */
+	static toPlanEntries(acpEntries: acp.PlanEntry[]): PlanEntry[] {
+		return acpEntries.map((entry) => ({
+			content: entry.content,
+			status: entry.status,
+			priority: entry.priority,
+		}));
+	}
+
+	/**
 	 * Convert ACP ToolCallContent to domain ToolCallContent.
 	 *
 	 * Supported content types: "diff", "terminal", "content" (text only).
 	 * Non-text "content" blocks (image, audio, resource) are dropped.
 	 *
 	 * @param acpContent - Tool call content from ACP protocol
+	 * @param logger - When provided, dropped blocks are logged (debug mode)
 	 * @returns Domain model tool call content, or undefined if input is null/empty
 	 */
 	static toToolCallContent(
 		acpContent: acp.ToolCallContent[] | undefined | null,
+		logger?: Logger,
 	): ToolCallContent[] | undefined {
 		if (!acpContent) return undefined;
 
@@ -81,7 +98,17 @@ export class AcpTypeConverter {
 						type: "content",
 						text: item.content.text,
 					});
+				} else if (item.content.type !== "text") {
+					logger?.log(
+						"[AcpTypeConverter] Dropped non-text tool call content block:",
+						item.content.type,
+					);
 				}
+			} else {
+				logger?.log(
+					"[AcpTypeConverter] Dropped unknown tool call content type:",
+					(item as { type: string }).type,
+				);
 			}
 		}
 
